@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 import whisperx
+from whisperx.diarize import DiarizationPipeline
 import torch
 
 # Configure logging
@@ -181,7 +182,7 @@ async def transcribe_audio(
             logger.info("Starting speaker diarization with pyannote community-1...")
             try:
                 # Load WhisperX diarization pipeline
-                diarize_model = whisperx.DiarizationPipeline(
+                diarize_model = DiarizationPipeline(
                     model_name="pyannote/speaker-diarization-community-1",
                     use_auth_token=HF_TOKEN,
                     device=torch.device(DEVICE)
