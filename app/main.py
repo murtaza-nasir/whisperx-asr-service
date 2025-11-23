@@ -13,6 +13,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 import whisperx
 import torch
+from pyannote.audio import Pipeline
 
 # Configure logging
 logging.basicConfig(
@@ -178,12 +179,14 @@ async def transcribe_audio(
 
         # Step 3: Speaker diarization (if enabled and HF token available)
         if enable_diarization and HF_TOKEN:
-            logger.info("Starting speaker diarization...")
+            logger.info("Starting speaker diarization with pyannote community-1...")
             try:
-                diarize_model = whisperx.DiarizationPipeline(
-                    use_auth_token=HF_TOKEN,
-                    device=DEVICE
+                # Load latest diarization pipeline (pyannote.audio 4.0)
+                diarize_model = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-community-1",
+                    token=HF_TOKEN
                 )
+                diarize_model.to(torch.device(DEVICE))
 
                 diarize_options = {}
                 if min_speakers:
