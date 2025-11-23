@@ -18,6 +18,8 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 - **Not production-grade**: Basic error handling, no authentication
 - **Single instance**: No built-in scaling or load balancing
 - **GPU required**: Needs NVIDIA GPU with 14GB+ VRAM for large models
+- **File size limits**: Large audio files (>1GB) can cause out-of-memory errors
+- **VRAM usage**: Memory consumption increases with file size and diarization
 - **Alpha software**: Expect bugs and breaking changes
 
 ## How It Works
@@ -79,11 +81,22 @@ Speaker diarization requires a Hugging Face token and model access. **You must c
 - Visit: [https://huggingface.co/join](https://huggingface.co/join)
 - Sign up with your email
 
-#### Step 2.2: Accept Model User Agreement
-- **REQUIRED:** Visit [https://huggingface.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-- Click **"Agree and access repository"** button
-- Fill out the gated access form (Company/university and use case)
-- Wait for instant approval (usually immediate)
+#### Step 2.2: Accept Model User Agreements (ALL REQUIRED)
+You need to accept agreements for **all three models** used by the diarization pipeline:
+
+1. **Main diarization model:**
+   - Visit: [https://huggingface.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+   - Click **"Agree and access repository"**
+
+2. **Segmentation model:**
+   - Visit: [https://huggingface.co/pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+   - Click **"Agree and access repository"**
+
+3. **Speaker diarization 3.1 (dependency):**
+   - Visit: [https://huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - Click **"Agree and access repository"**
+
+Fill out the form (Company/university and use case) - approval is instant.
 
 #### Step 2.3: Generate Access Token
 - Visit: [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
@@ -382,13 +395,17 @@ sudo systemctl restart docker
 
 ### Out of Memory Errors
 
-**Symptom:** `CUDA out of memory` errors
+**Symptom:** `CUDA out of memory` errors or VRAM exhaustion with large files
 
 **Solutions:**
-1. Use smaller model (`small` instead of `large-v3`)
-2. Reduce batch size in `.env`: `BATCH_SIZE=8`
-3. Use `COMPUTE_TYPE=int8` for lower memory usage
-4. Process shorter audio segments
+1. **Reduce file size limit** in `.env`: `MAX_FILE_SIZE_MB=500` (default is 1000MB)
+2. **Use smaller model**: `small` or `medium` instead of `large-v3`
+3. **Reduce batch size** in `.env`: `BATCH_SIZE=8` or `BATCH_SIZE=4`
+4. **Use int8 precision**: `COMPUTE_TYPE=int8` (lower quality but less memory)
+5. **Split large files**: Process audio in smaller chunks before uploading
+6. **Disable diarization**: For very large files, skip speaker diarization
+
+**Note:** The service automatically clears GPU cache between operations to minimize VRAM buildup, but very large files (>500MB) can still cause issues.
 
 ### Speaker Diarization Not Working
 

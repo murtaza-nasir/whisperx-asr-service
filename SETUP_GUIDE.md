@@ -61,11 +61,14 @@ This guide walks you through setting up the WhisperX ASR service for use with Sp
       - Visit: https://huggingface.co/join
       - Sign up with your email
 
-   b. **Accept Model Agreement (REQUIRED):**
-      - Visit: https://huggingface.co/pyannote/speaker-diarization-community-1
-      - Click **"Agree and access repository"**
-      - Fill out the form (Company/university and use case)
-      - Approval is instant
+   b. **Accept Model Agreements (REQUIRED - ALL THREE):**
+      Accept agreements for all models used by the pipeline:
+      - https://huggingface.co/pyannote/speaker-diarization-community-1
+      - https://huggingface.co/pyannote/segmentation-3.0
+      - https://huggingface.co/pyannote/speaker-diarization-3.1
+
+      For each: Click **"Agree and access repository"**
+      Fill out form (Company/use case) - approval is instant
 
    c. **Generate Token:**
       - Visit: https://huggingface.co/settings/tokens

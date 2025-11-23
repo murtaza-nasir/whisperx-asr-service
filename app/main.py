@@ -7,6 +7,7 @@ import os
 import tempfile
 import logging
 import warnings
+import gc
 from typing import Optional, List
 from pathlib import Path
 
@@ -39,6 +40,7 @@ COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))  # Default 1GB limit
 
 # Model cache
 loaded_models = {}
@@ -78,6 +80,14 @@ def load_whisper_model(model_name: str):
             raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
 
     return loaded_models[model_name]
+
+
+def clear_gpu_memory():
+    """Clear GPU memory cache to prevent VRAM buildup"""
+    if DEVICE == "cuda":
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.debug("GPU memory cache cleared")
 
 
 def format_timestamp(seconds: float) -> str:
@@ -139,7 +149,19 @@ async def transcribe_audio(
             content = await audio_file.read()
             temp_file.write(content)
 
-        logger.info(f"Processing audio file: {audio_file.filename}, model: {model}, language: {language}")
+        # Check file size
+        file_size_mb = len(content) / (1024 * 1024)
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({file_size_mb:.1f}MB). Maximum allowed: {MAX_FILE_SIZE_MB}MB. "
+                       f"Large files may cause out-of-memory errors."
+            )
+
+        if file_size_mb > 100:
+            logger.warning(f"Processing large file ({file_size_mb:.1f}MB) - may consume significant VRAM")
+
+        logger.info(f"Processing audio file: {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}, language: {language}")
 
         # Load model
         whisper_model = load_whisper_model(model)
@@ -162,6 +184,9 @@ async def transcribe_audio(
         detected_language = result.get("language", language or "en")
         logger.info(f"Transcription complete. Detected language: {detected_language}")
 
+        # Clear GPU memory after transcription
+        clear_gpu_memory()
+
         # Step 2: Align whisper output with word-level timestamps
         if word_timestamps:
             logger.info("Aligning timestamps...")
@@ -180,6 +205,10 @@ async def transcribe_audio(
                     return_char_alignments=False
                 )
                 logger.info("Timestamp alignment complete")
+
+                # Clear GPU memory after alignment
+                del model_a
+                clear_gpu_memory()
             except Exception as e:
                 logger.warning(f"Timestamp alignment failed: {str(e)}, continuing without word-level timestamps")
 
@@ -223,6 +252,10 @@ async def transcribe_audio(
                 # Assign speakers to words
                 result = whisperx.assign_word_speakers(diarize_segments, result)
                 logger.info("Speaker diarization complete")
+
+                # Clear GPU memory after diarization
+                del diarize_model
+                clear_gpu_memory()
             except Exception as e:
                 logger.warning(f"Speaker diarization failed: {str(e)}, continuing without diarization")
         elif enable_diarization and not HF_TOKEN:
