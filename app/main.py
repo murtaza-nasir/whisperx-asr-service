@@ -42,6 +42,19 @@ logger.info(f"WhisperX ASR Service initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Preload models on startup"""
+    preload_model = os.getenv("PRELOAD_MODEL", None)
+    if preload_model:
+        logger.info(f"Preloading model on startup: {preload_model}")
+        try:
+            load_whisper_model(preload_model)
+            logger.info(f"Successfully preloaded model: {preload_model}")
+        except Exception as e:
+            logger.error(f"Failed to preload model {preload_model}: {str(e)}")
+
+
 def load_whisper_model(model_name: str):
     """Load WhisperX model with caching"""
     if model_name not in loaded_models:
