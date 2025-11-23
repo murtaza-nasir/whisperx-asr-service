@@ -194,7 +194,8 @@ async def transcribe_audio(
                 if max_speakers:
                     diarize_options["max_speakers"] = max_speakers
 
-                diarize_segments = diarize_model(audio, **diarize_options)
+                # Pass file path to pyannote (not the numpy array)
+                diarize_segments = diarize_model(temp_audio_path, **diarize_options)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
                 logger.info("Speaker diarization complete")
             except Exception as e:
