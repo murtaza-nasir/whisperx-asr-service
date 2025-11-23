@@ -103,7 +103,7 @@ nano .env
 
 Update `.env`:
 ```bash
-HF_TOKEN=hf_your_actual_token_here
+HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DEVICE=cuda
 COMPUTE_TYPE=float16
 BATCH_SIZE=16
@@ -113,13 +113,13 @@ BATCH_SIZE=16
 
 ```bash
 # Build the Docker image (this will take 10-15 minutes)
-docker-compose build
+docker compose build
 
 # Start the service
-docker-compose up -d
+docker compose up -d
 
 # Check logs to ensure it's running
-docker-compose logs -f
+docker compose logs -f
 ```
 
 Look for:
@@ -163,7 +163,7 @@ ASR_BASE_URL=http://whisperx-asr-api:9000
 
 ```bash
 cd /path/to/speakr
-docker-compose restart
+docker compose restart
 ```
 
 ---
@@ -215,8 +215,8 @@ sudo firewall-cmd --reload
 #### Step 5: Start Service
 
 ```bash
-docker-compose up -d
-docker-compose logs -f
+docker compose up -d
+docker compose logs -f
 ```
 
 #### Step 6: Test from GPU Machine
@@ -258,7 +258,7 @@ Replace `GPU_MACHINE_IP` with the actual IP address of your GPU machine.
 
 ```bash
 cd /path/to/speakr
-docker-compose restart
+docker compose restart
 ```
 
 ---
@@ -360,11 +360,11 @@ curl -X POST http://localhost:9000/asr \
 2. Upload or record an audio file
 3. Check Speakr logs for ASR requests:
    ```bash
-   docker-compose logs -f app | grep ASR
+   docker compose logs -f app | grep ASR
    ```
 4. Check WhisperX service logs:
    ```bash
-   docker-compose logs -f whisperx-asr
+   docker compose logs -f whisperx-asr
    ```
 
 ---
@@ -375,7 +375,7 @@ curl -X POST http://localhost:9000/asr \
 
 **Check logs:**
 ```bash
-docker-compose logs whisperx-asr
+docker compose logs whisperx-asr
 ```
 
 **Common causes:**
@@ -428,7 +428,7 @@ nvidia-smi -l 1
 **Check:**
 1. HF_TOKEN is set correctly
 2. Accepted model user agreements on Hugging Face
-3. Check logs: `docker-compose logs | grep -i diarization`
+3. Check logs: `docker compose logs | grep -i diarization`
 
 **Solutions:**
 - Verify token: Visit https://huggingface.co/settings/tokens
@@ -439,7 +439,7 @@ nvidia-smi -l 1
 
 **Check logs:**
 ```bash
-docker-compose logs whisperx-asr | tail -100
+docker compose logs whisperx-asr | tail -100
 ```
 
 **Common causes:**
@@ -450,9 +450,9 @@ docker-compose logs whisperx-asr | tail -100
 
 **Solutions:**
 - Convert audio to MP3 or WAV
-- Restart service: `docker-compose restart`
+- Restart service: `docker compose restart`
 - Check available disk space
-- Rebuild image: `docker-compose build --no-cache`
+- Rebuild image: `docker compose build --no-cache`
 
 ---
 
@@ -462,7 +462,7 @@ docker-compose logs whisperx-asr | tail -100
 
 ```bash
 # Container status
-docker-compose ps
+docker compose ps
 
 # Resource usage
 docker stats whisperx-asr-api
@@ -475,13 +475,13 @@ nvidia-smi -l 1
 
 ```bash
 # Real-time logs
-docker-compose logs -f
+docker compose logs -f
 
 # Last 100 lines
-docker-compose logs --tail=100
+docker compose logs --tail=100
 
 # Errors only
-docker-compose logs | grep -i error
+docker compose logs | grep -i error
 ```
 
 ### Performance Monitoring
@@ -494,7 +494,7 @@ Create a simple monitoring script:
 
 echo "=== WhisperX ASR Service Status ==="
 echo "Container Status:"
-docker-compose ps
+docker compose ps
 
 echo -e "\n=== GPU Status ==="
 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
@@ -503,7 +503,7 @@ echo -e "\n=== Service Health ==="
 curl -s http://localhost:9000/health | json_pp
 
 echo -e "\n=== Recent Logs ==="
-docker-compose logs --tail=10
+docker compose logs --tail=10
 ```
 
 ---
@@ -539,8 +539,8 @@ docker-compose logs --tail=10
    ```bash
    # Update WhisperX service monthly
    git pull
-   docker-compose build --no-cache
-   docker-compose up -d
+   docker compose build --no-cache
+   docker compose up -d
    ```
 
 ---
@@ -560,7 +560,7 @@ docker-compose logs --tail=10
 If you encounter issues:
 
 1. Check this troubleshooting guide
-2. Review service logs: `docker-compose logs`
+2. Review service logs: `docker compose logs`
 3. Test with simple audio files first
 4. Verify GPU access: `nvidia-smi`
 5. Create an issue with logs and configuration details

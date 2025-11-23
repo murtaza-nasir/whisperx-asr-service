@@ -32,22 +32,34 @@ Audio Input → WhisperX Model → Timestamp Alignment → Speaker Diarization �
 
 ### Hardware Requirements
 
-**Minimum (CPU-only):**
-- CPU: 6+ cores
-- RAM: 8GB
-- Storage: 20GB
+GPU memory requirements vary by model size:
 
-**Recommended (GPU):**
-- GPU: NVIDIA GPU with 8GB+ VRAM (RTX 3060, RTX 3080, etc.)
+| Whisper Model | VRAM Required (with diarization) | Suitable GPUs |
+|---------------|----------------------------------|---------------|
+| tiny, base | ~4-5GB | RTX 3060 8GB, RTX 2060, GTX 1660 Ti |
+| small | ~6GB | RTX 3060, RTX 2070, RTX 2080 |
+| medium | ~10GB | RTX 3080, RTX 3060 12GB, RTX 2080 Ti |
+| large-v2, large-v3 | ~14GB | **RTX 3090**, RTX 4090, A6000, A100 |
+
+*Note: Measured with preloaded model + alignment + pyannote community-1 diarization on RTX 3090*
+
+**Minimum Configuration (small/medium models):**
+- GPU: NVIDIA RTX 3060 (12GB VRAM) or better
 - CPU: 8+ cores
 - RAM: 16GB
 - Storage: 50GB SSD
 
-**Optimal (Production):**
-- GPU: NVIDIA A100, RTX 4090, or equivalent
-- CPU: 16+ cores
+**Recommended Configuration (large-v3 with diarization):**
+- GPU: NVIDIA RTX 3090 (24GB VRAM) or RTX 4090
+- CPU: 12+ cores
 - RAM: 32GB
-- Storage: 100GB+ NVMe SSD
+- Storage: 100GB NVMe SSD
+
+**Production/High-Volume (multiple instances):**
+- GPU: NVIDIA A100 (40GB/80GB), A6000 (48GB)
+- CPU: 16+ cores
+- RAM: 64GB
+- Storage: 500GB+ NVMe SSD
 
 ### Software Requirements
 
@@ -60,11 +72,13 @@ Audio Input → WhisperX Model → Timestamp Alignment → Speaker Diarization �
 ### 1. Clone or Create Repository
 
 ```bash
-# If using Git
-git init
-git remote add origin <your-repo-url>
+# Clone the repository
+git clone https://github.com/murtaza-nasir/whisperx-asr-service.git
+cd whisperx-asr-service
 
-# Or just create the directory structure as shown in this repository
+# Or create from scratch
+mkdir whisperx-asr-service && cd whisperx-asr-service
+git init
 ```
 
 ### 2. Get Hugging Face Token
@@ -88,20 +102,20 @@ nano .env
 
 Update `HF_TOKEN` in `.env`:
 ```bash
-HF_TOKEN=your_actual_huggingface_token_here
+HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 ### 4. Build and Run
 
 ```bash
 # Build the Docker image
-docker-compose build
+docker compose build
 
 # Start the service
-docker-compose up -d
+docker compose up -d
 
 # Check logs
-docker-compose logs -f
+docker compose logs -f
 ```
 
 The service will be available at `http://localhost:9000`
@@ -233,7 +247,7 @@ If Speakr and WhisperX are in the same Docker Compose stack, use the container n
 
 ```bash
 # Make service accessible from network
-# Edit docker-compose.yml ports:
+# Edit docker compose.yml ports:
 ports:
   - "0.0.0.0:9000:9000"  # Expose to network
 ```
@@ -272,30 +286,34 @@ HF_TOKEN=hf_xxx...
 
 Available Whisper models (speed vs accuracy tradeoff):
 
-| Model | Size | VRAM | Speed | Quality |
-|-------|------|------|-------|---------|
-| `tiny` | 39M | ~1GB | Fastest | Lowest |
-| `base` | 74M | ~1GB | Very Fast | Low |
-| `small` | 244M | ~2GB | Fast | Medium |
-| `medium` | 769M | ~5GB | Moderate | Good |
-| `large-v2` | 1550M | ~10GB | Slow | Excellent |
-| `large-v3` | 1550M | ~10GB | Slow | Best |
+| Model | Parameters | VRAM (model only) | VRAM (full pipeline*) | Speed | Quality |
+|-------|------------|-------------------|----------------------|-------|---------|
+| `tiny` | 39M | ~1GB | ~4GB | Fastest | Lowest |
+| `base` | 74M | ~1GB | ~5GB | Very Fast | Low |
+| `small` | 244M | ~2GB | ~6GB | Fast | Medium |
+| `medium` | 769M | ~5GB | ~10GB | Moderate | Good |
+| `large-v2` | 1550M | ~10GB | ~14GB | Slow | Excellent |
+| `large-v3` | 1550M | ~10GB | ~14GB | Slow | Best |
 
-**Recommendation:** Use `large-v3` for best quality, `small` for speed/resource constraints.
+*Full pipeline = Whisper model + alignment model + pyannote speaker diarization (measured on RTX 3090)
+
+**Recommendation:**
+- Use `large-v3` for best quality (requires 16GB+ VRAM)
+- Use `small` or `medium` for speed/resource constraints (8-12GB VRAM)
 
 ## Deployment Options
 
 ### Development (Local Machine)
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 ### Production (Dedicated GPU Server)
 
 ```bash
 # Use production compose file
-docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose -f docker compose.yml -f docker compose.prod.yml up -d
 ```
 
 ### Scaling (Multiple Workers)
@@ -304,7 +322,7 @@ For high-volume deployments, run multiple instances behind a load balancer:
 
 ```bash
 # Scale to 3 instances
-docker-compose up -d --scale whisperx-asr=3
+docker compose up -d --scale whisperx-asr=3
 ```
 
 Use nginx or Traefik for load balancing.
@@ -327,10 +345,10 @@ Use nginx or Traefik for load balancing.
 
 ```bash
 # Real-time logs
-docker-compose logs -f
+docker compose logs -f
 
 # Last 100 lines
-docker-compose logs --tail=100
+docker compose logs --tail=100
 
 # Specific container logs
 docker logs whisperx-asr-api
@@ -399,7 +417,7 @@ sudo systemctl restart docker
 **Solutions:**
 1. Verify HF_TOKEN is set correctly
 2. Accept model user agreements on Hugging Face
-3. Check logs for diarization errors: `docker-compose logs`
+3. Check logs for diarization errors: `docker compose logs`
 4. Ensure `enable_diarization=true` in request
 
 ### Slow Processing
@@ -416,7 +434,7 @@ sudo systemctl restart docker
 
 **Check logs:**
 ```bash
-docker-compose logs whisperx-asr
+docker compose logs whisperx-asr
 ```
 
 Common causes:
@@ -490,21 +508,21 @@ server {
 git pull
 
 # Rebuild image
-docker-compose build --no-cache
+docker compose build --no-cache
 
 # Restart service
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Clearing Cache
 
 ```bash
 # Remove model cache
-docker-compose down -v
+docker compose down -v
 docker volume rm whisperx-asr-service_whisperx-cache
 
 # Rebuild
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Backup
@@ -535,7 +553,7 @@ Contributions welcome! Please:
 
 For issues and questions:
 
-- **GitHub Issues:** [Create an issue](https://github.com/yourusername/whisperx-asr-service/issues)
+- **GitHub Issues:** [Create an issue](https://github.com/murtaza-nasir/whisperx-asr-service/issues)
 - **WhisperX Issues:** [WhisperX repository](https://github.com/m-bain/whisperX/issues)
 
 ## Credits
