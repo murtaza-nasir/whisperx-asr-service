@@ -6,6 +6,9 @@ FROM nvidia/cuda:12.3.2-cudnn9-devel-ubuntu22.04
 # Prevent interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Add cuDNN library paths so PyTorch can find them
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
 # Set working directory
 WORKDIR /workspace
 
