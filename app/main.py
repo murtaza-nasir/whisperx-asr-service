@@ -181,7 +181,7 @@ async def transcribe_audio(
         if enable_diarization and HF_TOKEN:
             logger.info("Starting speaker diarization with pyannote community-1...")
             try:
-                # Load latest diarization pipeline (pyannote.audio 4.0)
+                # Load latest diarization pipeline (pyannote.audio 4.0 community-1)
                 diarize_model = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-community-1",
                     token=HF_TOKEN

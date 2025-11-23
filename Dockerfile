@@ -34,8 +34,12 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local
 # Install WhisperX and dependencies
 RUN pip3 install --no-cache-dir git+https://github.com/m-bain/whisperx.git
 
-# Upgrade pyannote.audio to latest version (for community-1 model support)
+# Upgrade to latest pyannote.audio for community-1 model support
 RUN pip3 install --no-cache-dir --upgrade pyannote.audio
+
+# Patch WhisperX's VAD code to work with latest pyannote.audio
+RUN sed -i 's/use_auth_token=/token=/g' /usr/local/lib/python3.10/dist-packages/whisperx/vad.py || true
+RUN sed -i 's/use_auth_token=/token=/g' /usr/local/lib/python3.10/dist-packages/whisperx/diarize.py || true
 
 # Install API dependencies
 RUN pip3 install --no-cache-dir \
