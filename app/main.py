@@ -13,7 +13,6 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 import whisperx
 import torch
-from pyannote.audio import Pipeline
 
 # Configure logging
 logging.basicConfig(
@@ -181,21 +180,21 @@ async def transcribe_audio(
         if enable_diarization and HF_TOKEN:
             logger.info("Starting speaker diarization with pyannote community-1...")
             try:
-                # Load latest diarization pipeline (pyannote.audio 4.0 community-1)
-                diarize_model = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-community-1",
-                    token=HF_TOKEN
+                # Load WhisperX diarization pipeline
+                diarize_model = whisperx.DiarizationPipeline(
+                    model_name="pyannote/speaker-diarization-community-1",
+                    use_auth_token=HF_TOKEN,
+                    device=torch.device(DEVICE)
                 )
-                diarize_model.to(torch.device(DEVICE))
 
-                diarize_options = {}
-                if min_speakers:
-                    diarize_options["min_speakers"] = min_speakers
-                if max_speakers:
-                    diarize_options["max_speakers"] = max_speakers
+                # Run diarization
+                diarize_segments = diarize_model(
+                    audio,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers
+                )
 
-                # Pass file path to pyannote (not the numpy array)
-                diarize_segments = diarize_model(temp_audio_path, **diarize_options)
+                # Assign speakers to words
                 result = whisperx.assign_word_speakers(diarize_segments, result)
                 logger.info("Speaker diarization complete")
             except Exception as e:
