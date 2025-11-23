@@ -6,9 +6,6 @@ FROM nvidia/cuda:12.3.2-cudnn9-devel-ubuntu22.04
 # Prevent interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Add cuDNN library paths so PyTorch can find them
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
-
 # Set working directory
 WORKDIR /workspace
 
@@ -25,11 +22,14 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip
 RUN python3 -m pip install --no-cache-dir --upgrade pip
 
-# Install PyTorch with CUDA support
+# Install PyTorch with CUDA support (includes bundled cuDNN 9.8)
 RUN pip3 install --no-cache-dir \
     torch==2.3.0 \
     torchaudio==2.3.0 \
     --index-url https://download.pytorch.org/whl/cu121
+
+# Set library path to prefer PyTorch's bundled cuDNN over system cuDNN
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
 # Install WhisperX and dependencies
 RUN pip3 install --no-cache-dir git+https://github.com/m-bain/whisperx.git
