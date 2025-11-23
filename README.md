@@ -136,6 +136,7 @@ Once running, visit http://localhost:9000/docs for interactive API documentation
 | `output_format` | String | `json` | Output format: `json`, `text`, `srt`, `vtt`, `tsv` |
 | `word_timestamps` | Boolean | `true` | Return word-level timestamps |
 | `enable_diarization` | Boolean | `true` | Enable speaker diarization |
+| `num_speakers` | Integer | Auto | Exact number of speakers (if known, overrides min/max) |
 | `min_speakers` | Integer | Auto | Minimum number of speakers |
 | `max_speakers` | Integer | Auto | Maximum number of speakers |
 
@@ -183,6 +184,30 @@ curl -X POST http://localhost:9000/asr \
   "word_segments": [...]
 }
 ```
+
+### Advanced Speaker Diarization Features
+
+#### Exact Speaker Count
+
+When you know the exact number of speakers, use `num_speakers` for more accurate diarization:
+
+```bash
+curl -X POST http://localhost:9000/asr \
+  -F "audio_file=@interview.mp3" \
+  -F "num_speakers=2" \
+  -F "enable_diarization=true"
+```
+
+This overrides `min_speakers` and `max_speakers` and typically provides better accuracy than range-based detection.
+
+#### Exclusive Speaker Diarization
+
+This service automatically uses **exclusive speaker diarization** when available from the pyannote community-1 model. This feature simplifies reconciliation between fine-grained speaker diarization timestamps and transcription timestamps, making it ideal for applications like Speakr where you need to align transcripts with speaker segments.
+
+**Benefits:**
+- More accurate timestamp alignment between speakers and words
+- Better handling of speaker transitions
+- Simplified post-processing for multi-speaker transcripts
 
 ## Integration with Speakr
 
