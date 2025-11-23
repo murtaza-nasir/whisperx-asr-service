@@ -11,7 +11,7 @@ import gc
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException
 from fastapi.responses import JSONResponse
 import whisperx
 from whisperx.diarize import DiarizationPipeline
@@ -118,12 +118,13 @@ async def transcribe_audio(
     initial_prompt: Optional[str] = Form(None),
     word_timestamps: bool = Form(True),
     output_format: str = Form("json"),
+    output: Optional[str] = Query(None),  # Legacy parameter name compatibility
     model: str = Form("large-v3"),
     num_speakers: Optional[int] = Form(None),
-    min_speakers: Optional[int] = Form(None),
-    max_speakers: Optional[int] = Form(None),
-    enable_diarization: bool = Form(True),
-    return_speaker_embeddings: bool = Form(False)
+    min_speakers: Optional[int] = Query(None),  # Accept from query params
+    max_speakers: Optional[int] = Query(None),  # Accept from query params
+    enable_diarization: Optional[bool] = Query(None),  # Accept from query params
+    return_speaker_embeddings: Optional[bool] = Query(None)  # Accept from query params
 ):
     """
     Main ASR endpoint compatible with openai-whisper-asr-webservice
@@ -145,6 +146,16 @@ async def transcribe_audio(
     temp_audio_path = None
 
     try:
+        # Handle legacy parameter names and query param defaults
+        if output is not None:
+            output_format = output  # Support legacy 'output' parameter
+
+        # Set defaults for query parameters (since Query(None) allows None)
+        if enable_diarization is None:
+            enable_diarization = True
+        if return_speaker_embeddings is None:
+            return_speaker_embeddings = False
+
         # Save uploaded file to temporary location
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio_file.filename).suffix) as temp_file:
             temp_audio_path = temp_file.name
