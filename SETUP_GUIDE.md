@@ -55,11 +55,24 @@ This guide walks you through setting up the WhisperX ASR service for use with Sp
    docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
    ```
 
-3. **Hugging Face Account and Token**
-   - Create account: https://huggingface.co/join
-   - Generate token: https://huggingface.co/settings/tokens
-   - Accept agreements for:
-     - https://huggingface.co/pyannote/speaker-diarization-community-1 (latest model - pyannote.audio 4.0)
+3. **Hugging Face Account and Token** - **YOU MUST COMPLETE ALL STEPS:**
+
+   a. **Create Account:**
+      - Visit: https://huggingface.co/join
+      - Sign up with your email
+
+   b. **Accept Model Agreement (REQUIRED):**
+      - Visit: https://huggingface.co/pyannote/speaker-diarization-community-1
+      - Click **"Agree and access repository"**
+      - Fill out the form (Company/university and use case)
+      - Approval is instant
+
+   c. **Generate Token:**
+      - Visit: https://huggingface.co/settings/tokens
+      - Click "New token" → Name it → Select "Read" permission
+      - Copy token (starts with `hf_...`)
+
+   ⚠️ **Without step (b), you will get "403 Access Denied" errors!**
 
 ---
 
@@ -508,40 +521,20 @@ docker compose logs --tail=10
 
 ---
 
-## Security Recommendations
+## Security Notes
 
-### For Production Deployment
+**This service has NO authentication or security features.**
 
-1. **Use HTTPS with Reverse Proxy**
-   ```bash
-   # Install nginx
-   sudo apt-get install nginx
+Basic protection:
+```bash
+# Restrict access to specific IP (e.g., your Speakr machine)
+sudo ufw allow from SPEAKR_IP to any port 9000
+sudo ufw deny 9000/tcp
 
-   # Configure SSL with Let's Encrypt
-   sudo certbot --nginx -d asr.yourdomain.com
-   ```
+# Store HF_TOKEN in .env file, not hardcoded
+```
 
-2. **Add API Key Authentication**
-
-   Update nginx configuration to check API keys.
-
-3. **Restrict Network Access**
-   ```bash
-   # Only allow from Speakr machine IP
-   sudo ufw allow from SPEAKR_IP to any port 9000
-   ```
-
-4. **Use Docker Secrets for HF_TOKEN**
-
-   Instead of .env file, use Docker secrets for production.
-
-5. **Regular Updates**
-   ```bash
-   # Update WhisperX service monthly
-   git pull
-   docker compose build --no-cache
-   docker compose up -d
-   ```
+For internet exposure, you'll need to add your own reverse proxy and authentication.
 
 ---
 
