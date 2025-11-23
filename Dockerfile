@@ -35,7 +35,8 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local
 RUN pip3 install --no-cache-dir git+https://github.com/sealambda/whisperX.git@feat/pyannote-audio-4
 
 # Patch WhisperX diarize.py to use 'token=' instead of 'use_token=' for pyannote.audio 4.0
-RUN sed -i 's/use_token=use_auth_token/token=use_auth_token/g' \
+# This handles both single-line and multi-line formatting
+RUN sed -i 's/use_token=/token=/g' \
     /usr/local/lib/python3.10/dist-packages/whisperx/diarize.py
 
 # Install latest pyannote.audio for community-1 model support
