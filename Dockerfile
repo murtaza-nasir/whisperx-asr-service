@@ -31,7 +31,8 @@ RUN pip3 install --no-cache-dir \
 # Set library path to prefer PyTorch's bundled cuDNN over system cuDNN
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-# Install WhisperX from the pyannote-audio-4 compatible branch
+# Install WhisperX from sealambda's pyannote-audio-4 compatible branch
+# Credit: https://github.com/sealambda/whisperX/tree/feat/pyannote-audio-4
 RUN pip3 install --no-cache-dir git+https://github.com/sealambda/whisperX.git@feat/pyannote-audio-4
 
 # Patch WhisperX diarize.py to use 'token=' instead of 'use_token=' for pyannote.audio 4.0

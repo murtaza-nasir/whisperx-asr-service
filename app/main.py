@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="WhisperX ASR API",
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
-    version="1.0.0"
+    version="0.1.1alpha"
 )
 
 # Configuration from environment variables

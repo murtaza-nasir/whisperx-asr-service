@@ -1,5 +1,13 @@
 # WhisperX ASR API Service
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Docker Hub](https://img.shields.io/badge/docker%20hub-whisperx--asr--service-blue.svg)](https://hub.docker.com/r/learnedmachine/whisperx-asr-service)
+[![Docker Pulls](https://img.shields.io/docker/pulls/learnedmachine/whisperx-asr-service)](https://hub.docker.com/r/learnedmachine/whisperx-asr-service)
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-009688.svg)](https://fastapi.tiangolo.com/)
+[![GPU Required](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg)](https://developer.nvidia.com/cuda-zone)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/murtaza-nasir/whisperx-asr-service)
+
 **⚠️ Alpha Version - For Self-Hosting Enthusiasts**
 
 A simple ASR API service powered by WhisperX for transcription with speaker diarization. Built for self-hosters running Speakr or similar applications.
@@ -7,7 +15,7 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 ## What This Does
 
 - Transcribes audio files using OpenAI Whisper models
-- Identifies speakers ("Who spoke when") using Pyannote.audio 4.0
+- Identifies speakers ("Who spoke when") using Pyannote.audio
 - Returns word-level timestamps
 - Supports 90+ languages
 - Outputs JSON, SRT, VTT, TSV formats
@@ -60,6 +68,22 @@ GPU memory requirements vary by model size:
 - **Hugging Face Account** (for speaker diarization models)
 
 ## Quick Start
+
+### Option A: Use Prebuilt Docker Image (Recommended)
+
+The easiest way to get started is using our prebuilt Docker images from Docker Hub:
+
+```bash
+# Pull the latest image
+docker pull learnedmachine/whisperx-asr-service:latest
+
+# Or pull a specific version
+docker pull learnedmachine/whisperx-asr-service:v0.1.1alpha
+```
+
+Then skip to [Step 2](#2-get-hugging-face-token-and-model-access) to configure your Hugging Face token.
+
+### Option B: Build from Source
 
 ### 1. Clone or Create Repository
 
@@ -441,26 +465,13 @@ Common causes:
 
 ## Supported Audio Formats
 
-The service supports all formats supported by FFmpeg:
+The service supports formats that WhisperX can process (via FFmpeg):
 
 - **Audio:** MP3, WAV, M4A, FLAC, AAC, OGG, WMA
 - **Video:** MP4, AVI, MOV, MKV, WebM (audio track extracted)
 - **Other:** AMR, 3GP, 3GPP
 
-Large files are automatically handled in chunks.
-
-## Performance Benchmarks
-
-Tested on RTX 3080 (10GB VRAM):
-
-| Model | Audio Length | Processing Time | Realtime Factor |
-|-------|--------------|-----------------|-----------------|
-| tiny | 10 minutes | 20 seconds | 30x |
-| small | 10 minutes | 45 seconds | 13x |
-| medium | 10 minutes | 90 seconds | 6.7x |
-| large-v3 | 10 minutes | 180 seconds | 3.3x |
-
-*With diarization enabled, add ~30% processing time*
+**Note:** Large files (>1GB) may cause out-of-memory errors as files are loaded entirely into memory.
 
 ## Security Notes
 
@@ -531,13 +542,14 @@ For issues and questions:
 ## Credits
 
 - **WhisperX:** [m-bain/whisperX](https://github.com/m-bain/whisperX)
+- **WhisperX Pyannote.audio 4 Support:** [sealambda/whisperX@feat/pyannote-audio-4](https://github.com/sealambda/whisperX/tree/feat/pyannote-audio-4) - This service uses sealambda's fork for pyannote.audio 4.0 compatibility
 - **OpenAI Whisper:** [openai/whisper](https://github.com/openai/whisper)
 - **Pyannote.audio:** [pyannote/pyannote-audio](https://github.com/pyannote/pyannote-audio)
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
 
-### v1.0.0 (2025-11-22)
+### v0.1.1alpha (2025-11-23)
 - Initial release
 - WhisperX integration with API wrapper
 - Speaker diarization support

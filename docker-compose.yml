@@ -2,9 +2,15 @@ version: '3.8'
 
 services:
   whisperx-asr:
+    # Option 1: Use prebuilt image from Docker Hub (recommended)
+    # Uncomment the line below and comment out the 'build' section
+    # image: learnedmachine/whisperx-asr-service:latest
+
+    # Option 2: Build from source (current default)
     build:
       context: .
       dockerfile: Dockerfile
+
     container_name: whisperx-asr-api
     restart: unless-stopped
 
@@ -31,6 +37,7 @@ services:
       # You must accept the user agreements for pyannote models:
       # - https://huggingface.co/pyannote/speaker-diarization-3.1
       # - https://huggingface.co/pyannote/segmentation-3.0
+      # - https://huggingface.co/pyannote/speaker-diarization-community-1
       - HF_TOKEN=${HF_TOKEN:-}
 
       # Cache directory for models
