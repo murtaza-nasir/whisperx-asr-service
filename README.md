@@ -338,6 +338,12 @@ BATCH_SIZE=16           # 16 for 8GB VRAM, 32+ for high-end GPUs
 
 # Hugging Face token for diarization
 HF_TOKEN=hf_xxx...
+
+# Model preloading (optional, reduces first-request latency)
+PRELOAD_MODEL=large-v3   # Leave empty to disable, or set to: tiny, base, small, medium, large-v2, large-v3
+
+# Maximum file size in MB (prevents out-of-memory errors)
+MAX_FILE_SIZE_MB=1000    # Default 1GB, adjust lower for GPUs with <16GB VRAM
 ```
 
 ### Model Selection
