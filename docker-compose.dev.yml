@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
 
     # GPU configuration
+    # To use all GPUs, use 'count: all'
+    # To use specific GPU(s), use 'device_ids: ["0"]' or 'device_ids: ["0", "1"]'
     deploy:
       resources:
         reservations:
@@ -21,21 +23,14 @@ services:
       - "9000:9000"
 
     environment:
-      # Device configuration
-      - DEVICE=cuda  # Use 'cuda' for GPU, 'cpu' for CPU-only
-      - COMPUTE_TYPE=float16  # float16 for GPU, int8 for CPU
-      - BATCH_SIZE=16
-
-      # Hugging Face token for speaker diarization models
-      # Get your token from https://huggingface.co/settings/tokens
-      # You must accept the user agreements for pyannote models:
-      # - https://huggingface.co/pyannote/speaker-diarization-3.1
-      # - https://huggingface.co/pyannote/segmentation-3.0
-      # - https://huggingface.co/pyannote/speaker-diarization-community-1
-      - HF_TOKEN=${HF_TOKEN:-}
-
-      # Cache directory for models
-      - CACHE_DIR=/.cache
+      # All values loaded from .env file
+      - DEVICE=${DEVICE:-cuda}
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
+      - BATCH_SIZE=${BATCH_SIZE:-16}
+      - HF_TOKEN=${HF_TOKEN}
+      - CACHE_DIR=${CACHE_DIR:-/.cache}
+      - PRELOAD_MODEL=${PRELOAD_MODEL:-}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
 
     volumes:
       # Persistent cache for models (recommended)
