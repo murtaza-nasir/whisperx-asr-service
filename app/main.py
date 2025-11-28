@@ -8,6 +8,8 @@ import tempfile
 import logging
 import warnings
 import gc
+import math
+import numpy as np
 from typing import Optional, List
 from pathlib import Path
 
@@ -97,6 +99,30 @@ def format_timestamp(seconds: float) -> str:
     secs = int(seconds % 60)
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def sanitize_float_values(obj):
+    """
+    Recursively sanitize float values in nested structures to ensure JSON compliance.
+    Replaces NaN and Inf values with None, and converts numpy arrays to lists.
+    """
+    if isinstance(obj, dict):
+        return {key: sanitize_float_values(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [sanitize_float_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return sanitize_float_values(obj.tolist())
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, (np.floating, np.integer)):
+        value = float(obj)
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    else:
+        return obj
 
 
 @app.get("/")
@@ -295,7 +321,8 @@ async def transcribe_audio(
 
             # Add speaker embeddings if they were requested and available
             if return_speaker_embeddings and speaker_embeddings:
-                response_data["speaker_embeddings"] = speaker_embeddings
+                # Sanitize embeddings to ensure JSON compliance (remove NaN/Inf values)
+                response_data["speaker_embeddings"] = sanitize_float_values(speaker_embeddings)
                 logger.info(f"Including speaker embeddings in response: {list(speaker_embeddings.keys())}")
 
             return JSONResponse(content=response_data)
