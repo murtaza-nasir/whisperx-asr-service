@@ -27,6 +27,7 @@ services:
       - BATCH_SIZE=${BATCH_SIZE:-16}
       - HF_TOKEN=${HF_TOKEN}
       - CACHE_DIR=${CACHE_DIR:-/.cache}
+      - HF_HOME=${CACHE_DIR:-/.cache}
       - PRELOAD_MODEL=${PRELOAD_MODEL:-}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
 

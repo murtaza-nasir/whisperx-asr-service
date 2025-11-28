@@ -43,12 +43,14 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))  # Default 1GB limit
+DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
 
 # Model cache
 loaded_models = {}
 
 logger.info(f"WhisperX ASR Service initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
+logger.info(f"Default model: {DEFAULT_MODEL}")
 
 
 @app.on_event("startup")
@@ -145,7 +147,7 @@ async def transcribe_audio(
     word_timestamps: bool = Form(True),
     output_format: str = Form("json"),
     output: Optional[str] = Query(None),  # Legacy parameter name compatibility
-    model: str = Form("large-v3"),
+    model: str = Form(DEFAULT_MODEL),
     num_speakers: Optional[int] = Form(None),
     min_speakers: Optional[int] = Query(None),  # Accept from query params
     max_speakers: Optional[int] = Query(None),  # Accept from query params

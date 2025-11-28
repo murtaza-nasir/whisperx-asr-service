@@ -52,6 +52,7 @@ cache/
 
 # Docker
 .dockerignore
+docker-compose.local.yml
 
 # Temporary files
 temp/
