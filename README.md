@@ -226,7 +226,7 @@ Once running, visit http://localhost:9000/docs for interactive API documentation
 | `model` | String | `large-v3` | Whisper model: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3` |
 | `output_format` | String | `json` | Output format: `json`, `text`, `srt`, `vtt`, `tsv` |
 | `word_timestamps` | Boolean | `true` | Return word-level timestamps |
-| `enable_diarization` | Boolean | `true` | Enable speaker diarization |
+| `diarize` | Boolean | `true` | Enable speaker diarization |
 | `num_speakers` | Integer | Auto | Exact number of speakers (if known, overrides min/max) |
 | `min_speakers` | Integer | Auto | Minimum number of speakers |
 | `max_speakers` | Integer | Auto | Maximum number of speakers |
@@ -239,7 +239,7 @@ curl -X POST http://localhost:9000/asr \
   -F "language=en" \
   -F "model=large-v3" \
   -F "output_format=json" \
-  -F "enable_diarization=true" \
+  -F "diarize=true" \
   -F "min_speakers=2" \
   -F "max_speakers=5"
 ```
@@ -251,7 +251,7 @@ curl -X POST http://localhost:9000/asr \
   -F "audio_file=@video.mp4" \
   -F "language=en" \
   -F "output_format=srt" \
-  -F "enable_diarization=false"
+  -F "diarize=false"
 ```
 
 **Example Response (JSON):**
@@ -286,7 +286,7 @@ When you know the exact number of speakers, use `num_speakers` for more accurate
 curl -X POST http://localhost:9000/asr \
   -F "audio_file=@interview.mp3" \
   -F "num_speakers=2" \
-  -F "enable_diarization=true"
+  -F "diarize=true"
 ```
 
 This overrides `min_speakers` and `max_speakers` and typically provides better accuracy than range-based detection.
@@ -449,7 +449,7 @@ This service can run completely offline after an initial setup with internet acc
    ```bash
    curl -X POST http://localhost:9000/asr \
      -F "audio_file=@test.mp3" \
-     -F "enable_diarization=true"
+     -F "diarize=true"
    ```
 3. This downloads and caches:
    - Whisper model (e.g., large-v3)
@@ -533,7 +533,7 @@ sudo systemctl restart docker
 1. Verify HF_TOKEN is set correctly
 2. Accept model user agreements on Hugging Face
 3. Check logs for diarization errors: `docker compose logs`
-4. Ensure `enable_diarization=true` in request
+4. Ensure `diarize=true` in request
 
 ### Slow Processing
 
@@ -543,7 +543,7 @@ sudo systemctl restart docker
 1. Use GPU instead of CPU (`DEVICE=cuda`)
 2. Use smaller model for faster processing
 3. Increase `BATCH_SIZE` (if you have VRAM)
-4. Disable diarization if not needed: `enable_diarization=false`
+4. Disable diarization if not needed: `diarize=false`
 
 ### PyTorch 2.6 Weights Loading Error
 

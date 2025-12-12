@@ -151,7 +151,8 @@ async def transcribe_audio(
     num_speakers: Optional[int] = Form(None),
     min_speakers: Optional[int] = Query(None),  # Accept from query params
     max_speakers: Optional[int] = Query(None),  # Accept from query params
-    enable_diarization: Optional[bool] = Query(None),  # Accept from query params
+    diarize: Optional[bool] = Query(None),  # Enable speaker diarization (compatible with whisper-asr-webservice)
+    enable_diarization: Optional[bool] = Query(None),  # Alias for diarize (deprecated)
     return_speaker_embeddings: Optional[bool] = Query(None)  # Accept from query params
 ):
     """
@@ -168,7 +169,8 @@ async def transcribe_audio(
         num_speakers: Exact number of speakers (if known, overrides min/max)
         min_speakers: Minimum number of speakers for diarization
         max_speakers: Maximum number of speakers for diarization
-        enable_diarization: Enable speaker diarization
+        diarize: Enable speaker diarization (compatible with whisper-asr-webservice)
+        enable_diarization: Alias for diarize (deprecated, use diarize instead)
         return_speaker_embeddings: Return speaker embeddings (256-dimensional vectors)
     """
     temp_audio_path = None
@@ -179,8 +181,11 @@ async def transcribe_audio(
             output_format = output  # Support legacy 'output' parameter
 
         # Set defaults for query parameters (since Query(None) allows None)
-        if enable_diarization is None:
-            enable_diarization = True
+        # Handle diarize/enable_diarization: use either param, default to True if neither specified
+        if diarize is not None or enable_diarization is not None:
+            should_diarize = (diarize is True) or (enable_diarization is True)
+        else:
+            should_diarize = True  # Default to enabled
         if return_speaker_embeddings is None:
             return_speaker_embeddings = False
 
@@ -255,7 +260,7 @@ async def transcribe_audio(
 
         # Step 3: Speaker diarization (if enabled and HF token available)
         speaker_embeddings = None
-        if enable_diarization and HF_TOKEN:
+        if should_diarize and HF_TOKEN:
             logger.info("Starting speaker diarization with pyannote community-1...")
             try:
                 # Load WhisperX diarization pipeline
@@ -309,7 +314,7 @@ async def transcribe_audio(
                 clear_gpu_memory()
             except Exception as e:
                 logger.warning(f"Speaker diarization failed: {str(e)}, continuing without diarization")
-        elif enable_diarization and not HF_TOKEN:
+        elif should_diarize and not HF_TOKEN:
             logger.warning("Speaker diarization requested but HF_TOKEN not set")
 
         # Format output based on requested format
