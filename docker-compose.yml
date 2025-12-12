@@ -28,6 +28,8 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - CACHE_DIR=${CACHE_DIR:-/.cache}
       - HF_HOME=${CACHE_DIR:-/.cache}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-}
+      - NLTK_DATA=/.cache/nltk_data
       - PRELOAD_MODEL=${PRELOAD_MODEL:-}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
 

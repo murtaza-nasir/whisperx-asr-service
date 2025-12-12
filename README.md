@@ -438,6 +438,59 @@ nvidia-smi -l 1
 docker stats whisperx-asr-api
 ```
 
+## Offline Use
+
+This service can run completely offline after an initial setup with internet access. This is useful for air-gapped environments or when you want to avoid network latency.
+
+### Initial Setup (requires internet)
+
+1. Start the container with internet access
+2. Run at least one transcription request with diarization enabled to cache all models:
+   ```bash
+   curl -X POST http://localhost:9000/asr \
+     -F "audio_file=@test.mp3" \
+     -F "enable_diarization=true"
+   ```
+3. This downloads and caches:
+   - Whisper model (e.g., large-v3)
+   - Alignment model (wav2vec2)
+   - Pyannote speaker diarization models
+
+### Enable Offline Mode
+
+Add `HF_HUB_OFFLINE=1` to your `docker-compose.yml` environment section:
+
+```yaml
+environment:
+  - HF_HUB_OFFLINE=1
+  # ... other environment variables
+```
+
+**Important:** This must be set directly in `docker-compose.yml`, not in the `.env` file.
+
+Then restart the container:
+```bash
+docker compose down && docker compose up -d
+```
+
+The service will now operate without any network requests to Hugging Face.
+
+### What Gets Cached
+
+| Component | Cache Location | Notes |
+|-----------|---------------|-------|
+| Whisper models | `/.cache/models--Systran--faster-whisper-*` | Downloaded on first use |
+| Alignment model | `/.cache/wav2vec2_*.pth` | Downloaded on first alignment |
+| Pyannote models | `/.cache/huggingface/hub/models--pyannote--*` | Downloaded on first diarization |
+| NLTK tokenizers | `/.cache/nltk_data/` | Pre-downloaded in Docker image |
+
+### Troubleshooting Offline Mode
+
+If you see errors like `Failed to resolve 'huggingface.co'`:
+1. Ensure you ran a full transcription with diarization while online
+2. Verify `HF_HUB_OFFLINE=1` is set in `docker-compose.yml` (not `.env`)
+3. Check the cache volume contains the models: `docker exec whisperx-asr-api ls -la /.cache/huggingface/hub/`
+
 ## Troubleshooting
 
 ### GPU Not Detected
@@ -491,6 +544,25 @@ sudo systemctl restart docker
 2. Use smaller model for faster processing
 3. Increase `BATCH_SIZE` (if you have VRAM)
 4. Disable diarization if not needed: `enable_diarization=false`
+
+### PyTorch 2.6 Weights Loading Error
+
+**Symptom:** Error message containing `Weights only load failed` or `GLOBAL omegaconf.listconfig.ListConfig was not an allowed global`
+
+This occurs due to a security change in PyTorch 2.6 where `weights_only=True` became the default for `torch.load()`.
+
+**Solution:**
+
+Add this environment variable to your `docker-compose.yml`:
+
+```yaml
+environment:
+  - TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
+```
+
+**Important:** Setting this in `.env` file alone may not work - it must be set directly in `docker-compose.yml` under the `environment` section.
+
+See [WhisperX Issue #1304](https://github.com/m-bain/whisperX/issues/1304) for more details.
 
 ### API Returns 500 Errors
 

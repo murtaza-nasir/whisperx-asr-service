@@ -50,6 +50,10 @@ RUN pip3 install --no-cache-dir \
     python-multipart==0.0.6 \
     pydantic==2.5.0
 
+# Pre-download NLTK data for timestamp alignment (enables offline use)
+RUN python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/.cache/nltk_data')"
+ENV NLTK_DATA=/.cache/nltk_data
+
 # Create cache directory
 RUN mkdir -p /.cache && chmod 777 /.cache
 
