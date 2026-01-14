@@ -405,10 +405,11 @@ async def health_check():
     }
 
 
-# Register OpenAI-compatible API router
+# Register OpenAI-compatible API routers
 # Import here to avoid circular imports (openai_compat imports from this module)
-from app.openai_compat import router as openai_router
+from app.openai_compat import router as openai_router, models_router
 app.include_router(openai_router)
+app.include_router(models_router)
 
 
 if __name__ == "__main__":

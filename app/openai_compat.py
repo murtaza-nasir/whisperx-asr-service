@@ -2,11 +2,13 @@
 OpenAI-compatible Whisper API endpoints
 POST /v1/audio/transcriptions
 POST /v1/audio/translations
+GET /v1/models
 """
 
 import os
 import tempfile
 import logging
+import time
 from typing import Optional, List, Union
 from pathlib import Path
 
@@ -33,11 +35,13 @@ from app.main import (
     CACHE_DIR,
     DEFAULT_MODEL,
     MAX_FILE_SIZE_MB,
+    loaded_models,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/audio", tags=["OpenAI Compatible"])
+models_router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 # Model mapping: OpenAI model names to WhisperX model names
 MODEL_MAPPING = {
@@ -411,4 +415,50 @@ async def create_translation(
         temperature=temperature,
         timestamp_granularities=timestamp_granularities,
         task="translate"
+    )
+
+
+# Available whisper models
+AVAILABLE_MODELS = [
+    {"id": "whisper-1", "object": "model", "owned_by": "openai"},
+    {"id": "whisper-large-v3", "object": "model", "owned_by": "whisperx"},
+    {"id": "whisper-large-v2", "object": "model", "owned_by": "whisperx"},
+    {"id": "whisper-medium", "object": "model", "owned_by": "whisperx"},
+    {"id": "whisper-small", "object": "model", "owned_by": "whisperx"},
+    {"id": "whisper-base", "object": "model", "owned_by": "whisperx"},
+    {"id": "whisper-tiny", "object": "model", "owned_by": "whisperx"},
+]
+
+
+@models_router.get("/models")
+async def list_models():
+    """
+    List available models.
+
+    OpenAI-compatible endpoint: GET /v1/models
+
+    Returns a list of available whisper models that can be used for transcription.
+    """
+    return {
+        "object": "list",
+        "data": AVAILABLE_MODELS
+    }
+
+
+@models_router.get("/models/{model_id}")
+async def get_model(model_id: str):
+    """
+    Get details about a specific model.
+
+    OpenAI-compatible endpoint: GET /v1/models/{model_id}
+    """
+    for model in AVAILABLE_MODELS:
+        if model["id"] == model_id:
+            return model
+
+    return create_openai_error(
+        404,
+        f"Model '{model_id}' not found",
+        error_type="invalid_request_error",
+        code="model_not_found"
     )
