@@ -232,13 +232,14 @@ async def process_audio(
         duration = len(audio) / 16000  # WhisperX loads at 16kHz
 
         # Transcription options
+        # Note: WhisperX FasterWhisperPipeline doesn't support initial_prompt
         transcribe_options = {
             "batch_size": BATCH_SIZE,
             "language": language,
             "task": task
         }
         if prompt:
-            transcribe_options["initial_prompt"] = prompt
+            logger.warning("prompt parameter provided but not supported by WhisperX - ignoring")
 
         # Run transcription
         result = whisper_model.transcribe(audio, **transcribe_options)
