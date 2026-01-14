@@ -405,6 +405,12 @@ async def health_check():
     }
 
 
+# Register OpenAI-compatible API router
+# Import here to avoid circular imports (openai_compat imports from this module)
+from app.openai_compat import router as openai_router
+app.include_router(openai_router)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9000)
