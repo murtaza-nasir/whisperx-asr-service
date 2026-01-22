@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException
 from fastapi.responses import JSONResponse
 import whisperx
+from app.version import __version__
 from whisperx.diarize import DiarizationPipeline
 import torch
 
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="WhisperX ASR API",
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
-    version="0.1.1alpha"
+    version=__version__
 )
 
 # Configuration from environment variables
@@ -48,7 +49,7 @@ DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
 # Model cache
 loaded_models = {}
 
-logger.info(f"WhisperX ASR Service initialized on device: {DEVICE}")
+logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
 logger.info(f"Default model: {DEFAULT_MODEL}")
 
@@ -141,14 +142,14 @@ async def root():
 @app.post("/asr")
 async def transcribe_audio(
     audio_file: UploadFile = File(...),
-    task: str = Form("transcribe"),
-    language: Optional[str] = Form(None),
-    initial_prompt: Optional[str] = Form(None),
-    word_timestamps: bool = Form(True),
-    output_format: str = Form("json"),
+    task: str = Query("transcribe"),
+    language: Optional[str] = Query(None),
+    initial_prompt: Optional[str] = Query(None),
+    word_timestamps: bool = Query(True),
+    output_format: str = Query("json"),
     output: Optional[str] = Query(None),  # Legacy parameter name compatibility
-    model: str = Form(DEFAULT_MODEL),
-    num_speakers: Optional[int] = Form(None),
+    model: str = Query(DEFAULT_MODEL),
+    num_speakers: Optional[int] = Query(None),
     min_speakers: Optional[int] = Query(None),  # Accept from query params
     max_speakers: Optional[int] = Query(None),  # Accept from query params
     diarize: Optional[bool] = Query(None),  # Enable speaker diarization (compatible with whisper-asr-webservice)

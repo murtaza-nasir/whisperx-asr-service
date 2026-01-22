@@ -1,5 +1,6 @@
 # WhisperX ASR API Service
 
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/releases/tag/v0.2.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/learnedmachine/whisperx-asr-service)](https://hub.docker.com/r/learnedmachine/whisperx-asr-service)
@@ -662,9 +663,14 @@ For issues and questions:
 
 ## Changelog
 
+### v0.2.0 (2025-01-21)
+- Add /v1/models and /v1/audio/transcriptions endpoints for OpenAI API compatibility
+- Add diarize parameter for broader API compatibility
+- Add offline mode support and fix model caching
+- Use Query() parameters to work as a drop-in replacement for other Whisper ASR services
+
 ### v0.1.1alpha (2025-11-23)
 - Initial release
 - WhisperX integration with API wrapper
 - Speaker diarization support
 - Docker deployment
-- Compatible API with openai-whisper-asr-webservice
