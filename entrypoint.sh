@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+VERSION=$(python3 -c "from app.version import __version__; print(__version__)")
+echo "WhisperX ASR Service v${VERSION}"
+
 if [ "$SERVE_MODE" = "ray" ]; then
     echo "Starting in Ray Serve mode..."
 

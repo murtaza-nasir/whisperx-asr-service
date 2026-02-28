@@ -10,6 +10,7 @@ import os
 import gc
 import math
 import logging
+import threading
 import warnings
 from typing import Optional, Dict, Any, Tuple
 
@@ -34,6 +35,8 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
 
+_model_load_lock = threading.Lock()
+
 # ---------------------------------------------------------------------------
 # Model caches
 # ---------------------------------------------------------------------------
@@ -57,45 +60,51 @@ def clear_gpu_memory():
 # Stage 0 -- model loading
 # ---------------------------------------------------------------------------
 def load_whisper_model(model_name: str):
-    """Load WhisperX model with caching."""
+    """Load WhisperX model with caching (thread-safe)."""
     if model_name not in _whisper_models:
-        logger.info(f"Loading WhisperX model: {model_name}")
-        model = whisperx.load_model(
-            model_name,
-            device=DEVICE,
-            compute_type=COMPUTE_TYPE,
-            download_root=CACHE_DIR,
-        )
-        _whisper_models[model_name] = model
-        logger.info(f"Model {model_name} loaded successfully")
+        with _model_load_lock:
+            if model_name not in _whisper_models:
+                logger.info(f"Loading WhisperX model: {model_name}")
+                model = whisperx.load_model(
+                    model_name,
+                    device=DEVICE,
+                    compute_type=COMPUTE_TYPE,
+                    download_root=CACHE_DIR,
+                )
+                _whisper_models[model_name] = model
+                logger.info(f"Model {model_name} loaded successfully")
     return _whisper_models[model_name]
 
 
 def load_align_model(language_code: str):
-    """Load alignment model with per-language caching."""
+    """Load alignment model with per-language caching (thread-safe)."""
     if language_code not in _align_models:
-        logger.info(f"Loading alignment model for language: {language_code}")
-        model_a, metadata = whisperx.load_align_model(
-            language_code=language_code,
-            device=DEVICE,
-            model_dir=CACHE_DIR,
-        )
-        _align_models[language_code] = (model_a, metadata)
-        logger.info(f"Alignment model for {language_code} loaded")
+        with _model_load_lock:
+            if language_code not in _align_models:
+                logger.info(f"Loading alignment model for language: {language_code}")
+                model_a, metadata = whisperx.load_align_model(
+                    language_code=language_code,
+                    device=DEVICE,
+                    model_dir=CACHE_DIR,
+                )
+                _align_models[language_code] = (model_a, metadata)
+                logger.info(f"Alignment model for {language_code} loaded")
     return _align_models[language_code]
 
 
 def load_diarize_pipeline() -> DiarizationPipeline:
-    """Load diarization pipeline (singleton)."""
+    """Load diarization pipeline (singleton, thread-safe)."""
     global _diarize_pipeline
     if _diarize_pipeline is None:
-        logger.info("Loading diarization pipeline: pyannote/speaker-diarization-community-1")
-        _diarize_pipeline = DiarizationPipeline(
-            model_name="pyannote/speaker-diarization-community-1",
-            use_auth_token=HF_TOKEN,
-            device=torch.device(DEVICE),
-        )
-        logger.info("Diarization pipeline loaded")
+        with _model_load_lock:
+            if _diarize_pipeline is None:
+                logger.info("Loading diarization pipeline: pyannote/speaker-diarization-community-1")
+                _diarize_pipeline = DiarizationPipeline(
+                    model_name="pyannote/speaker-diarization-community-1",
+                    use_auth_token=HF_TOKEN,
+                    device=torch.device(DEVICE),
+                )
+                logger.info("Diarization pipeline loaded")
     return _diarize_pipeline
 
 

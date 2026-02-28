@@ -850,6 +850,7 @@ For issues and questions:
 ## Changelog
 
 ### v0.3.0 (2026-02-28)
+- Thread-safe model loading with double-checked locking for concurrent request safety
 - Add Ray Serve mode for high-throughput ASR with cross-request batching
 - Two pipeline strategies: `replicate` (full pipeline per GPU) and `split` (stage per GPU)
 - Multi-GPU support via `NUM_GPU_REPLICAS` and per-stage replica/fraction config

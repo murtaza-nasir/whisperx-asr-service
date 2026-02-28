@@ -16,6 +16,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION=$(python3 -c "exec(open('app/version.py').read()); print(__version__)")
+          echo "Tag version:  ${TAG_VERSION}"
+          echo "File version: ${FILE_VERSION}"
+          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Version mismatch: tag is v${TAG_VERSION} but app/version.py has ${FILE_VERSION}"
+            exit 1
+          fi
+
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet
