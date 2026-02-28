@@ -22,9 +22,11 @@ services:
       - "${RAY_DASHBOARD_PORT:-8265}:8265"  # Ray dashboard (only used in ray mode)
 
     # Ray uses /dev/shm for object store
-    shm_size: '2g'
+    shm_size: '8g'
 
     environment:
+      # Suppress pyannote's torchcodec UserWarning in all processes (including Ray workers)
+      - PYTHONWARNINGS=ignore::UserWarning
       # All values loaded from .env file
       - DEVICE=${DEVICE:-cuda}
       - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
@@ -38,11 +40,22 @@ services:
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
       # Serve mode: simple (uvicorn) or ray (Ray Serve)
       - SERVE_MODE=${SERVE_MODE:-simple}
+      # Pipeline strategy (ray mode): replicate (full pipeline per GPU) or split (stage per GPU)
+      - PIPELINE_STRATEGY=${PIPELINE_STRATEGY:-replicate}
       # Ray Serve batching config
       - WHISPER_BATCH_SIZE=${WHISPER_BATCH_SIZE:-4}
       - ALIGN_BATCH_SIZE=${ALIGN_BATCH_SIZE:-8}
       - DIARIZE_BATCH_SIZE=${DIARIZE_BATCH_SIZE:-2}
       - BATCH_WAIT_TIMEOUT=${BATCH_WAIT_TIMEOUT:-0.1}
+      # GPU allocation per Ray Serve stage (set each to 1.0 to spread across GPUs)
+      - WHISPER_GPU_FRACTION=${WHISPER_GPU_FRACTION:-0.5}
+      - ALIGN_GPU_FRACTION=${ALIGN_GPU_FRACTION:-0.3}
+      - DIARIZE_GPU_FRACTION=${DIARIZE_GPU_FRACTION:-0.2}
+      # Replicas per stage (defaults to NUM_GPU_REPLICAS; override per-stage for hybrid)
+      - NUM_GPU_REPLICAS=${NUM_GPU_REPLICAS:-1}
+      - WHISPER_NUM_REPLICAS=${WHISPER_NUM_REPLICAS:-}
+      - ALIGN_NUM_REPLICAS=${ALIGN_NUM_REPLICAS:-}
+      - DIARIZE_NUM_REPLICAS=${DIARIZE_NUM_REPLICAS:-}
       # GPU concurrency for simple mode queue
       - GPU_CONCURRENCY=${GPU_CONCURRENCY:-1}
 

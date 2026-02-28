@@ -1,6 +1,6 @@
 # WhisperX ASR API Service
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/releases/tag/v0.2.0)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/releases/tag/v0.3.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/learnedmachine/whisperx-asr-service)](https://hub.docker.com/r/learnedmachine/whisperx-asr-service)
@@ -36,8 +36,10 @@ Audio --> Whisper (transcription) --> Wav2Vec2 (alignment) --> Pyannote (speaker
 
 The service supports two serving modes:
 
-- **Simple mode** (default): Single-process uvicorn with an async GPU queue. Requests are serialized through a semaphore so only one pipeline runs on the GPU at a time. Good for low-traffic or development use.
-- **Ray Serve mode**: Each pipeline stage (Whisper, Align, Diarize) runs as an independent Ray Serve deployment with cross-request batching (`@serve.batch`). This enables stage-level parallelism -- while request A is being diarized, request B can start transcription on the same GPU. Scales from 1 GPU to multi-GPU by increasing `num_replicas`.
+- **Simple mode** (default): Single-process uvicorn with an async GPU queue. Requests are serialized through a semaphore so only one pipeline runs on the GPU at a time. Good for single-GPU, low-traffic, or development use.
+- **Ray Serve mode**: Runs on Ray Serve with cross-request batching (`@serve.batch`). Scales from 1 GPU to multi-GPU. Two pipeline strategies are available:
+  - **Replicate** (default): Each GPU runs the complete pipeline (Whisper + Align + Diarize). 4 GPUs = 4 independent pipeline replicas, no cross-GPU data transfer.
+  - **Split**: Each stage runs as a separate deployment with fractional GPU allocation. Useful when you want independent scaling per stage.
 
 ## Prerequisites
 
@@ -376,7 +378,7 @@ MAX_FILE_SIZE_MB=1000    # Default 1GB, adjust lower for GPUs with <16GB VRAM
 
 ### Serve Mode
 
-The service supports two modes, controlled by the `SERVE_MODE` environment variable in your `.env` file:
+Controlled by the `SERVE_MODE` environment variable in your `.env` file.
 
 #### Simple Mode (default)
 
@@ -394,22 +396,65 @@ You can tune `GPU_CONCURRENCY=1` (default) to control how many pipeline runs exe
 SERVE_MODE=ray
 ```
 
-Runs Ray Serve with three independent deployments:
+Runs on Ray Serve with cross-request batching (`@serve.batch`). Two pipeline strategies are available, controlled by `PIPELINE_STRATEGY`:
 
-```
-HTTP --> Ray Serve Proxy --> ASR Ingress
-                                |
-                       +--------+--------+
-                       |        |        |
-                   Whisper   Align    Diarize
-                  (GPU 0.5) (GPU 0.3) (GPU 0.2)
-```
-
-Each deployment uses `@serve.batch` for cross-request batching -- multiple concurrent requests are grouped into a single GPU batch for higher throughput.
-
-**Ray Serve configuration variables** (all optional, shown with defaults):
+##### Replicate Strategy (default, recommended)
 
 ```bash
+PIPELINE_STRATEGY=replicate
+NUM_GPU_REPLICAS=4       # one full pipeline per GPU
+```
+
+Each GPU runs the complete 3-stage pipeline. Ray Serve routes incoming requests across replicas.
+
+```
+                    +-- GPU 0: [Whisper + Align + Diarize] --+
+HTTP --> Proxy -->  +-- GPU 1: [Whisper + Align + Diarize] --+--> Response
+                    +-- GPU 2: [Whisper + Align + Diarize] --+
+                    +-- GPU 3: [Whisper + Align + Diarize] --+
+```
+
+##### Split Strategy
+
+```bash
+PIPELINE_STRATEGY=split
+```
+
+Each pipeline stage runs as a separate deployment with fractional GPU allocation and cross-request batching (`@serve.batch`). Stage-level pipelining means request B can start transcription while request A is still in diarization.
+
+```
+HTTP --> Proxy --> ASR Ingress
+                       |
+              +--------+--------+
+              |        |        |
+          Whisper   Align    Diarize
+         (GPU 0.5) (GPU 0.3) (GPU 0.2)
+```
+
+##### Strategy Comparison
+
+Both strategies achieve similar throughput (~6.3-6.5x speedup on 4x RTX 3090 with 8 concurrent workers).
+
+| | Replicate | Split |
+|---|-----------|-------|
+| **Configuration** | Simple -- just set `NUM_GPU_REPLICAS` | Complex -- GPU fractions, per-stage replicas, bin-packing tuning |
+| **Cross-GPU transfer** | None -- audio stays on one GPU | Yes -- results move between stages |
+| **Tail latency** | Higher variance | Lower and more consistent |
+| **Scaling** | Add a GPU, add a replica | Scale bottleneck stages independently (e.g. more Whisper replicas) |
+| **VRAM per GPU** | Must fit all 3 models | Each stage uses a fraction |
+| **Best for** | Most setups, multi-GPU throughput | Advanced tuning, heterogeneous stage scaling |
+
+##### Ray Serve Configuration
+
+All optional, shown with defaults:
+
+```bash
+# Pipeline strategy: replicate (full pipeline per GPU) or split (stage per GPU)
+PIPELINE_STRATEGY=replicate
+
+# Number of pipeline replicas (set to number of GPUs)
+NUM_GPU_REPLICAS=1
+
 # Cross-request batch sizes per stage (tune for GPU VRAM)
 WHISPER_BATCH_SIZE=4
 ALIGN_BATCH_SIZE=8
@@ -418,15 +463,59 @@ DIARIZE_BATCH_SIZE=2
 # Seconds to wait collecting a batch before processing what's available
 BATCH_WAIT_TIMEOUT=0.1
 
-# Fractional GPU allocation per stage (must sum to <= total GPUs)
+# Split strategy only: fractional GPU allocation per stage
 WHISPER_GPU_FRACTION=0.5
 ALIGN_GPU_FRACTION=0.3
 DIARIZE_GPU_FRACTION=0.2
+
+# Split strategy only: per-stage replica overrides (fall back to NUM_GPU_REPLICAS)
+# WHISPER_NUM_REPLICAS=2
+# ALIGN_NUM_REPLICAS=1
+# DIARIZE_NUM_REPLICAS=1
+```
+
+##### Multi-GPU Examples
+
+```bash
+# 4 GPUs, full pipeline on each (recommended)
+SERVE_MODE=ray
+PIPELINE_STRATEGY=replicate
+NUM_GPU_REPLICAS=4
+
+# 3 GPUs, one stage per GPU
+SERVE_MODE=ray
+PIPELINE_STRATEGY=split
+WHISPER_GPU_FRACTION=1.0
+ALIGN_GPU_FRACTION=1.0
+DIARIZE_GPU_FRACTION=1.0
+
+# 4 GPUs, hybrid: 2 Whisper + 1 Align + 1 Diarize
+SERVE_MODE=ray
+PIPELINE_STRATEGY=split
+WHISPER_NUM_REPLICAS=2  WHISPER_GPU_FRACTION=1.0
+ALIGN_NUM_REPLICAS=1    ALIGN_GPU_FRACTION=1.0
+DIARIZE_NUM_REPLICAS=1  DIARIZE_GPU_FRACTION=1.0
 ```
 
 When running in Ray mode, the Ray Dashboard is available at `http://localhost:8265` for monitoring deployments, replicas, and request metrics.
 
-**Scaling to multi-GPU:** Increase `num_replicas` per deployment in `app/serve_deployments.py` or assign stages to specific GPUs by adjusting the GPU fractions. With 2+ GPUs, you can run Whisper on one GPU and Align+Diarize on another.
+##### GPU Pinning
+
+To restrict which GPUs the service uses, create a `docker-compose.dev.local.yml` override (gitignored):
+
+```yaml
+services:
+  whisperx-asr:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0,1,2,3
+      - NUM_GPU_REPLICAS=4
+```
+
+Then start with:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
+```
 
 ### Model Selection
 
@@ -461,7 +550,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-**Note:** When using Ray Serve mode, Docker Compose is configured with `shm_size: 2g` for Ray's shared memory object store. The Ray Dashboard is exposed on port 8265.
+**Note:** When using Ray Serve mode, Docker Compose is configured with `shm_size: 8g` for Ray's shared memory object store. The Ray Dashboard is exposed on port 8265.
 
 ## Monitoring and Logs
 
@@ -708,6 +797,26 @@ docker run --rm -v whisperx-asr-service_whisperx-cache:/cache \
   -v $(pwd):/backup ubuntu tar czf /backup/whisperx-cache-backup.tar.gz /cache
 ```
 
+## Stress Testing
+
+A stress test script is included to measure throughput and latency under concurrent load:
+
+```bash
+# Default: 4 concurrent workers, all files in testfiles/
+python tests/stress_test.py
+
+# 8 concurrent workers, 3 rounds
+python tests/stress_test.py --workers 8 --rounds 3
+
+# Test OpenAI-compat endpoint
+python tests/stress_test.py --endpoint openai
+
+# Without diarization
+python tests/stress_test.py --no-diarize
+```
+
+Place `.mp3` files in the `testfiles/` directory (gitignored). The report shows per-request latency, throughput in requests/minute, and the speedup from concurrent execution. See `tests/README.md` for full details.
+
 ## License
 
 This project is MIT licensed. See [LICENSE](LICENSE) for details.
@@ -742,12 +851,15 @@ For issues and questions:
 
 ### v0.3.0 (2026-02-28)
 - Add Ray Serve mode for high-throughput ASR with cross-request batching
-- Refactor pipeline into shared stage functions (transcribe, align, diarize)
+- Two pipeline strategies: `replicate` (full pipeline per GPU) and `split` (stage per GPU)
+- Multi-GPU support via `NUM_GPU_REPLICAS` and per-stage replica/fraction config
+- Refactor pipeline into shared stage functions (`app/pipeline.py`)
 - Add async GPU queue with semaphore for simple mode (non-blocking event loop)
-- Add `/metrics` endpoint for queue depth and pipeline monitoring
-- Add `SERVE_MODE` env var to switch between simple (uvicorn) and Ray Serve
-- Stage-level parallelism: concurrent requests processed across pipeline stages
+- Add `/metrics` endpoint for pipeline monitoring
+- Add `SERVE_MODE`, `PIPELINE_STRATEGY`, `NUM_GPU_REPLICAS` env vars
 - Add `entrypoint.sh` for automatic mode switching in Docker
+- GPU pinning via `NVIDIA_VISIBLE_DEVICES` in local compose overrides
+- Add stress test suite (`tests/stress_test.py`)
 
 ### v0.2.0 (2025-01-21)
 - Add /v1/models and /v1/audio/transcriptions endpoints for OpenAI API compatibility

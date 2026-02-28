@@ -62,3 +62,6 @@ notes.md
 temp/
 tmp/
 *.tmp
+
+# Test audio files
+testfiles/

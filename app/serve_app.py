@@ -40,7 +40,13 @@ from app.schemas import (
     OpenAIErrorDetail,
     OpenAIErrorResponse,
 )
-from app.serve_deployments import WhisperDeployment, AlignDeployment, DiarizeDeployment
+from app.serve_deployments import (
+    PIPELINE_STRATEGY,
+    FullPipelineDeployment,
+    WhisperDeployment,
+    AlignDeployment,
+    DiarizeDeployment,
+)
 
 warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
 
@@ -88,11 +94,20 @@ fastapi_app = FastAPI(
 )
 
 
-@serve.deployment(num_replicas=1, ray_actor_options={"num_cpus": 1})
+@serve.deployment(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1},
+    # The ingress is a lightweight async FastAPI router -- it reads the file,
+    # then awaits a GPU replica.  It must accept many concurrent requests so
+    # the proxy never blocks while GPU replicas are busy.
+    max_ongoing_requests=100,
+)
 @serve.ingress(fastapi_app)
 class ASRIngress:
 
-    def __init__(self, whisper_handle, align_handle, diarize_handle):
+    def __init__(self, pipeline_handle=None, whisper_handle=None,
+                 align_handle=None, diarize_handle=None):
+        self._pipeline = pipeline_handle
         self._whisper = whisper_handle
         self._align = align_handle
         self._diarize = diarize_handle
@@ -175,22 +190,31 @@ class ASRIngress:
             logger.info(f"Processing {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}")
             audio = whisperx.load_audio(temp_audio_path)
 
-            result = await self._whisper.transcribe.remote(
-                audio, model_name=model, language=language,
-                task=task, initial_prompt=initial_prompt,
-            )
-
-            if word_timestamps:
-                result = await self._align.align.remote(audio, result)
-
-            speaker_embeddings = None
-            if should_diarize:
-                result, speaker_embeddings = await self._diarize.diarize.remote(
-                    audio, result,
+            if self._pipeline:
+                result, speaker_embeddings = await self._pipeline.run.remote(
+                    audio, model_name=model, language=language,
+                    task=task, initial_prompt=initial_prompt,
+                    word_timestamps=word_timestamps,
+                    should_diarize=should_diarize,
                     num_speakers=num_speakers, min_speakers=min_speakers,
                     max_speakers=max_speakers,
                     return_speaker_embeddings=return_speaker_embeddings,
                 )
+            else:
+                result = await self._whisper.transcribe.remote(
+                    audio, model_name=model, language=language,
+                    task=task, initial_prompt=initial_prompt,
+                )
+                if word_timestamps:
+                    result = await self._align.align.remote(audio, result)
+                speaker_embeddings = None
+                if should_diarize:
+                    result, speaker_embeddings = await self._diarize.diarize.remote(
+                        audio, result,
+                        num_speakers=num_speakers, min_speakers=min_speakers,
+                        max_speakers=max_speakers,
+                        return_speaker_embeddings=return_speaker_embeddings,
+                    )
 
             detected_language = result.get("language", language or "en")
             return self._format_asr_response(
@@ -328,18 +352,23 @@ class ASRIngress:
             audio = whisperx.load_audio(temp_audio_path)
             duration = len(audio) / 16000
 
-            # Transcribe via Ray deployment
-            result = await self._whisper.transcribe.remote(
-                audio, model_name=whisperx_model, language=language, task=task,
-            )
-
-            # Align if needed
             need_word_timestamps = (
                 response_format == ResponseFormat.VERBOSE_JSON
                 and "word" in timestamp_granularities
             )
-            if need_word_timestamps:
-                result = await self._align.align.remote(audio, result)
+
+            if self._pipeline:
+                result, _ = await self._pipeline.run.remote(
+                    audio, model_name=whisperx_model, language=language, task=task,
+                    word_timestamps=need_word_timestamps,
+                    should_diarize=False,
+                )
+            else:
+                result = await self._whisper.transcribe.remote(
+                    audio, model_name=whisperx_model, language=language, task=task,
+                )
+                if need_word_timestamps:
+                    result = await self._align.align.remote(audio, result)
 
             detected_language = result.get("language", language or "en")
 
@@ -494,8 +523,16 @@ class ASRIngress:
 # ------------------------------------------------------------------
 # Bind deployments into the application graph
 # ------------------------------------------------------------------
-whisper_deployment = WhisperDeployment.bind()
-align_deployment = AlignDeployment.bind()
-diarize_deployment = DiarizeDeployment.bind()
-
-app = ASRIngress.bind(whisper_deployment, align_deployment, diarize_deployment)
+if PIPELINE_STRATEGY == "split":
+    logger.info("Using split strategy: separate deployments per stage")
+    app = ASRIngress.bind(
+        pipeline_handle=None,
+        whisper_handle=WhisperDeployment.bind(),
+        align_handle=AlignDeployment.bind(),
+        diarize_handle=DiarizeDeployment.bind(),
+    )
+else:
+    logger.info("Using replicate strategy: full pipeline per GPU")
+    app = ASRIngress.bind(
+        pipeline_handle=FullPipelineDeployment.bind(),
+    )

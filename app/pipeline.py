@@ -10,7 +10,12 @@ import os
 import gc
 import math
 import logging
+import warnings
 from typing import Optional, Dict, Any, Tuple
+
+# Suppress pyannote's torchcodec warning -- we decode audio via whisperx.load_audio (ffmpeg),
+# not pyannote's built-in decoder, so the missing torchcodec is irrelevant.
+warnings.filterwarnings("ignore", message=".*torchcodec.*")
 
 import numpy as np
 import torch
