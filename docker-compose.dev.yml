@@ -9,15 +9,15 @@ services:
     restart: unless-stopped
 
     # GPU configuration
-    # To use all GPUs, use 'count: all'
-    # To use specific GPU(s), use 'device_ids: ["0"]' or 'device_ids: ["0", "1"]'
+    # Uses GPU 0 by default. To pin to a different GPU, create
+    # docker-compose.dev.local.yml (gitignored) with NVIDIA_VISIBLE_DEVICES.
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
+              count: all
               capabilities: [gpu]
-              device_ids: ["4"]
 
     ports:
       - "9000:9000"

@@ -53,6 +53,7 @@ cache/
 # Docker
 .dockerignore
 docker-compose.local.yml
+docker-compose.dev.local.yml
 
 # Local notes
 notes.md
