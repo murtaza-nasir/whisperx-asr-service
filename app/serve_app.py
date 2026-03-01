@@ -152,6 +152,7 @@ class ASRIngress:
         task: str = Query("transcribe"),
         language: Optional[str] = Query(None),
         initial_prompt: Optional[str] = Query(None),
+        hotwords: Optional[str] = Query(None),
         word_timestamps: bool = Query(True),
         output_format: str = Query("json"),
         output: Optional[str] = Query(None),
@@ -194,6 +195,7 @@ class ASRIngress:
                 result, speaker_embeddings = await self._pipeline.run.remote(
                     audio, model_name=model, language=language,
                     task=task, initial_prompt=initial_prompt,
+                    hotwords=hotwords,
                     word_timestamps=word_timestamps,
                     should_diarize=should_diarize,
                     num_speakers=num_speakers, min_speakers=min_speakers,
@@ -204,6 +206,7 @@ class ASRIngress:
                 result = await self._whisper.transcribe.remote(
                     audio, model_name=model, language=language,
                     task=task, initial_prompt=initial_prompt,
+                    hotwords=hotwords,
                 )
                 if word_timestamps:
                     result = await self._align.align.remote(audio, result)
@@ -243,6 +246,7 @@ class ASRIngress:
         model: str = Form(...),
         language: Optional[str] = Form(None),
         prompt: Optional[str] = Form(None),
+        hotwords: Optional[str] = Form(None),
         response_format: ResponseFormat = Form(ResponseFormat.JSON),
         temperature: float = Form(0.0, ge=0.0, le=1.0),
     ):
@@ -257,6 +261,7 @@ class ASRIngress:
             file=file, model=model, language=language, prompt=prompt,
             response_format=response_format, temperature=temperature,
             timestamp_granularities=timestamp_granularities, task="transcribe",
+            hotwords=hotwords,
         )
 
     # ------------------------------------------------------------------
@@ -269,6 +274,7 @@ class ASRIngress:
         file: UploadFile = File(...),
         model: str = Form(...),
         prompt: Optional[str] = Form(None),
+        hotwords: Optional[str] = Form(None),
         response_format: ResponseFormat = Form(ResponseFormat.JSON),
         temperature: float = Form(0.0, ge=0.0, le=1.0),
     ):
@@ -283,6 +289,7 @@ class ASRIngress:
             file=file, model=model, language=None, prompt=prompt,
             response_format=response_format, temperature=temperature,
             timestamp_granularities=timestamp_granularities, task="translate",
+            hotwords=hotwords,
         )
 
     # ------------------------------------------------------------------
@@ -305,7 +312,7 @@ class ASRIngress:
     # ------------------------------------------------------------------
     async def _process_openai_audio(
         self, file, model, language, prompt, response_format,
-        temperature, timestamp_granularities, task,
+        temperature, timestamp_granularities, task, hotwords=None,
     ):
         temp_audio_path = None
         try:
@@ -344,8 +351,7 @@ class ASRIngress:
                     code="file_too_large",
                 )
 
-            if prompt:
-                logger.warning("prompt parameter provided but not supported by WhisperX - ignoring")
+            effective_hotwords = hotwords or prompt
 
             logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
 
@@ -360,12 +366,14 @@ class ASRIngress:
             if self._pipeline:
                 result, _ = await self._pipeline.run.remote(
                     audio, model_name=whisperx_model, language=language, task=task,
+                    hotwords=effective_hotwords,
                     word_timestamps=need_word_timestamps,
                     should_diarize=False,
                 )
             else:
                 result = await self._whisper.transcribe.remote(
                     audio, model_name=whisperx_model, language=language, task=task,
+                    hotwords=effective_hotwords,
                 )
                 if need_word_timestamps:
                     result = await self._align.align.remote(audio, result)

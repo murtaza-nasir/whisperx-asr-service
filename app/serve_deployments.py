@@ -108,6 +108,7 @@ class FullPipelineDeployment:
         language: Optional[str] = None,
         task: str = "transcribe",
         initial_prompt: Optional[str] = None,
+        hotwords: Optional[str] = None,
         word_timestamps: bool = True,
         should_diarize: bool = True,
         num_speakers: Optional[int] = None,
@@ -121,6 +122,7 @@ class FullPipelineDeployment:
             language=language,
             task=task,
             initial_prompt=initial_prompt,
+            hotwords=hotwords,
             word_timestamps=word_timestamps,
             should_diarize=should_diarize,
             num_speakers=num_speakers,
@@ -170,10 +172,11 @@ class WhisperDeployment:
         languages: List[Optional[str]],
         tasks: List[str],
         initial_prompts: List[Optional[str]],
+        hotwords_list: List[Optional[str]],
     ) -> List[dict]:
         results = []
-        for audio, model_name, language, task, prompt in zip(
-            audios, model_names, languages, tasks, initial_prompts
+        for audio, model_name, language, task, prompt, hotwords in zip(
+            audios, model_names, languages, tasks, initial_prompts, hotwords_list
         ):
             result = _transcribe(
                 audio,
@@ -181,6 +184,7 @@ class WhisperDeployment:
                 language=language,
                 task=task,
                 initial_prompt=prompt,
+                hotwords=hotwords,
             )
             results.append(result)
         return results
@@ -192,9 +196,10 @@ class WhisperDeployment:
         language: Optional[str] = None,
         task: str = "transcribe",
         initial_prompt: Optional[str] = None,
+        hotwords: Optional[str] = None,
     ) -> dict:
         return await self.transcribe_batch(
-            audio, model_name, language, task, initial_prompt
+            audio, model_name, language, task, initial_prompt, hotwords
         )
 
 

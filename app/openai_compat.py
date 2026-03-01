@@ -164,6 +164,7 @@ def _run_transcribe_and_align(
     language: Optional[str],
     task: str,
     need_word_timestamps: bool,
+    hotwords: Optional[str] = None,
 ):
     """Blocking helper that runs transcription + optional alignment on GPU."""
     result = pipeline_transcribe(
@@ -171,6 +172,7 @@ def _run_transcribe_and_align(
         model_name=whisperx_model,
         language=language,
         task=task,
+        hotwords=hotwords,
     )
     if need_word_timestamps:
         result = pipeline_align(audio, result)
@@ -185,7 +187,8 @@ async def process_audio(
     response_format: ResponseFormat,
     temperature: float,
     timestamp_granularities: List[str],
-    task: str = "transcribe"
+    task: str = "transcribe",
+    hotwords: Optional[str] = None,
 ) -> Union[JSONResponse, PlainTextResponse]:
     """
     Core audio processing function shared by transcriptions and translations endpoints
@@ -239,9 +242,6 @@ async def process_audio(
 
         logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
 
-        if prompt:
-            logger.warning("prompt parameter provided but not supported by WhisperX - ignoring")
-
         # Load audio
         audio = whisperx.load_audio(temp_audio_path)
         duration = len(audio) / 16000  # WhisperX loads at 16kHz
@@ -259,6 +259,7 @@ async def process_audio(
             language,
             task,
             need_word_timestamps,
+            hotwords=hotwords or prompt,
         )
 
         detected_language = result.get("language", language or "en")
@@ -328,6 +329,7 @@ async def create_transcription(
     model: str = Form(..., description="Model ID (whisper-1, large-v3, etc.)"),
     language: Optional[str] = Form(None, description="ISO-639-1 language code"),
     prompt: Optional[str] = Form(None, description="Guidance text/context"),
+    hotwords: Optional[str] = Form(None, description="Hotwords/phrases to bias transcription"),
     response_format: ResponseFormat = Form(
         ResponseFormat.JSON,
         description="Output format: json, text, srt, verbose_json, vtt"
@@ -355,7 +357,8 @@ async def create_transcription(
         response_format=response_format,
         temperature=temperature,
         timestamp_granularities=timestamp_granularities,
-        task="transcribe"
+        task="transcribe",
+        hotwords=hotwords,
     )
 
 
@@ -365,6 +368,7 @@ async def create_translation(
     file: UploadFile = File(..., description="Audio file to translate"),
     model: str = Form(..., description="Model ID (whisper-1, large-v3, etc.)"),
     prompt: Optional[str] = Form(None, description="Guidance text/context"),
+    hotwords: Optional[str] = Form(None, description="Hotwords/phrases to bias transcription"),
     response_format: ResponseFormat = Form(
         ResponseFormat.JSON,
         description="Output format: json, text, srt, verbose_json, vtt"
@@ -392,7 +396,8 @@ async def create_translation(
         response_format=response_format,
         temperature=temperature,
         timestamp_granularities=timestamp_granularities,
-        task="translate"
+        task="translate",
+        hotwords=hotwords,
     )
 
 

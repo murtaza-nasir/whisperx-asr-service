@@ -117,20 +117,32 @@ def transcribe(
     language: Optional[str] = None,
     task: str = "transcribe",
     initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
 ) -> dict:
     """Run WhisperX transcription and return raw result dict."""
     whisper_model = load_whisper_model(model_name)
+
+    # Set per-request options on the model's transcription options.
+    # The model is cached/shared, so we must reset after transcription.
+    if hotwords is not None:
+        whisper_model.options.hotwords = hotwords
+    if initial_prompt is not None:
+        whisper_model.options.initial_prompt = initial_prompt
 
     transcribe_options: Dict[str, Any] = {
         "batch_size": BATCH_SIZE,
         "language": language,
         "task": task,
     }
-    if initial_prompt:
-        transcribe_options["initial_prompt"] = initial_prompt
 
     logger.info("Starting transcription...")
-    result = whisper_model.transcribe(audio, **transcribe_options)
+    try:
+        result = whisper_model.transcribe(audio, **transcribe_options)
+    finally:
+        if hotwords is not None:
+            whisper_model.options.hotwords = None
+        if initial_prompt is not None:
+            whisper_model.options.initial_prompt = None
 
     detected_language = result.get("language", language or "en")
     logger.info(f"Transcription complete. Detected language: {detected_language}")
@@ -265,6 +277,7 @@ def run_pipeline(
     language: Optional[str] = None,
     task: str = "transcribe",
     initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
     word_timestamps: bool = True,
     should_diarize: bool = True,
     num_speakers: Optional[int] = None,
@@ -283,6 +296,7 @@ def run_pipeline(
         language=language,
         task=task,
         initial_prompt=initial_prompt,
+        hotwords=hotwords,
     )
 
     if word_timestamps:

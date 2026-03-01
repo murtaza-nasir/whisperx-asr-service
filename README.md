@@ -235,6 +235,8 @@ Once running, visit http://localhost:9000/docs for interactive API documentation
 | `task` | String | `transcribe` | Task type: `transcribe` or `translate` |
 | `language` | String | Auto-detect | Language code (e.g., `en`, `es`, `fr`) |
 | `model` | String | `large-v3` | Whisper model: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3` |
+| `initial_prompt` | String | None | Context or spelling guide to steer the model |
+| `hotwords` | String | None | Comma-separated words to bias transcription toward |
 | `output_format` | String | `json` | Output format: `json`, `text`, `srt`, `vtt`, `tsv` |
 | `word_timestamps` | Boolean | `true` | Return word-level timestamps |
 | `diarize` | Boolean | `true` | Enable speaker diarization |
@@ -310,6 +312,52 @@ This service automatically uses **exclusive speaker diarization** when available
 - More accurate timestamp alignment between speakers and words
 - Better handling of speaker transitions
 - Simplified post-processing for multi-speaker transcripts
+
+### Custom Vocabulary (Hotwords)
+
+Whisper often misspells brand names, acronyms, and domain-specific terms. You can improve accuracy using `hotwords` and `initial_prompt`:
+
+- `hotwords` biases the model's beam search to favor specific words during decoding
+- `initial_prompt` provides a sentence of context that primes the model to expect certain spellings
+
+**Example:** transcribing audio that says *"We deployed Speakr on a Kubernetes cluster using CTranslate2 for inference. PyAnnote handles the diarization."*
+
+```bash
+# Baseline (no hints)
+curl -X POST "http://localhost:9000/asr?language=en" \
+  -F "audio_file=@meeting.mp3"
+# Result: "We deployed Speaker...using ctranslate2...PnNote handles the diarization."
+
+# With hotwords
+curl -X POST "http://localhost:9000/asr?language=en&hotwords=Speakr,CTranslate2,PyAnnote" \
+  -F "audio_file=@meeting.mp3"
+# Result: "We deployed Speaker...using CTranslate2...PyAnnote handles the diarization."
+
+# With hotwords + initial_prompt (best results)
+curl -X POST "http://localhost:9000/asr?language=en&hotwords=Speakr,CTranslate2,PyAnnote&initial_prompt=Speakr is a transcription app." \
+  -F "audio_file=@meeting.mp3"
+# Result: "We deployed Speakr...using CTranslate2...PyAnnote handles the diarization."
+```
+
+| Word | No hints | Hotwords | Hotwords + initial_prompt |
+|---|---|---|---|
+| CTranslate2 | ctranslate2 | CTranslate2 | CTranslate2 |
+| PyAnnote | PnNote | PyAnnote | PyAnnote |
+| Speakr | Speaker | Speaker | Speakr |
+
+`hotwords` alone fixes most spelling issues. Words that sound identical to common English words (like "Speakr" vs "Speaker") may need `initial_prompt` as well to provide enough context for the model to override its default.
+
+The OpenAI-compatible endpoints (`/v1/audio/transcriptions`) also support a `hotwords` form field. If only `prompt` is provided, it is used as hotwords.
+
+A test script is included to verify hotwords with your own audio:
+
+```bash
+./tests/test_hotwords.sh testfiles/your_audio.flac
+
+# Custom hotwords
+HOTWORDS="MyBrand,TechTerm" INITIAL_PROMPT="MyBrand is a product." \
+  ./tests/test_hotwords.sh testfiles/your_audio.flac
+```
 
 ## Integration with Speakr
 
@@ -507,9 +555,11 @@ To restrict which GPUs the service uses, create a `docker-compose.dev.local.yml`
 services:
   whisperx-asr:
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0,1,2,3
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
       - NUM_GPU_REPLICAS=4
 ```
+
+Use `CUDA_VISIBLE_DEVICES` (not `NVIDIA_VISIBLE_DEVICES`) since the Docker Compose `deploy` section exposes all GPUs to the container.
 
 Then start with:
 
