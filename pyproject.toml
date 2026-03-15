@@ -15,9 +15,14 @@ dependencies = [
 [project.optional-dependencies]
 cpu = [
     "whisperx[cpu]",
+    "torch~=2.8.0",
+    "torchaudio~=2.8.0",
 ]
 gpu = [
     "whisperx[gpu]",
+    "torch~=2.8.0",
+    "torchaudio~=2.8.0",
+    "triton>=3.3.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv]
@@ -30,3 +35,24 @@ conflicts = [
 
 [tool.uv.sources]
 whisperx = { path = "../whisperX-custom", editable = true }
+torch = [
+  { index = "pytorch-cu130", extra = "gpu" },
+  { index = "pytorch-cpu", extra = "cpu" },
+]
+torchaudio = [
+  { index = "pytorch-cu130", extra = "gpu" },
+  { index = "pytorch-cpu", extra = "cpu" },
+]
+triton = [
+  { index = "pytorch-cu130", extra = "gpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
