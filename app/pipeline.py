@@ -98,10 +98,10 @@ def load_diarize_pipeline() -> DiarizationPipeline:
     if _diarize_pipeline is None:
         with _model_load_lock:
             if _diarize_pipeline is None:
-                logger.info("Loading diarization pipeline: pyannote/speaker-diarization-community-1")
+                logger.info("Loading diarization pipeline: pyannote/speaker-diarization-3.1")
                 _diarize_pipeline = DiarizationPipeline(
-                    model_name="pyannote/speaker-diarization-community-1",
-                    token=HF_TOKEN,
+                    model_name="pyannote/speaker-diarization-3.1",
+                    use_auth_token=HF_TOKEN,
                     device=torch.device(DEVICE),
                 )
                 logger.info("Diarization pipeline loaded")
