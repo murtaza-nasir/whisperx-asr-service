@@ -101,7 +101,6 @@ def load_diarize_pipeline() -> DiarizationPipeline:
                 logger.info("Loading diarization pipeline: pyannote/speaker-diarization-3.1")
                 _diarize_pipeline = DiarizationPipeline(
                     model_name="pyannote/speaker-diarization-3.1",
-                    use_auth_token=HF_TOKEN,
                     device=torch.device(DEVICE),
                 )
                 logger.info("Diarization pipeline loaded")
