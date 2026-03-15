@@ -13,8 +13,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cpu = [
+    "whisperx[cpu]",
+]
 gpu = [
     "whisperx[gpu]",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "gpu" },
+    ],
 ]
 
 [tool.uv.sources]
