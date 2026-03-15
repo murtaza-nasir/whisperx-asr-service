@@ -233,6 +233,32 @@ async def transcribe_audio(
 
             return {"tsv": "\n".join(tsv_content)}
 
+        elif output_format == "conversation":
+            conversation = []
+            current_speaker = None
+            current_text = []
+            for segment in result.get("segments", []):
+                speaker = segment.get("speaker", "Unknown")
+                text = segment.get("text", "").strip()
+                if not text:
+                    continue
+                if speaker == current_speaker:
+                    current_text.append(text)
+                else:
+                    if current_text:
+                        conversation.append({
+                            "speaker": current_speaker,
+                            "text": " ".join(current_text),
+                        })
+                    current_speaker = speaker
+                    current_text = [text]
+            if current_text:
+                conversation.append({
+                    "speaker": current_speaker,
+                    "text": " ".join(current_text),
+                })
+            return JSONResponse(content={"conversation": conversation})
+
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported output format: {output_format}")
 
