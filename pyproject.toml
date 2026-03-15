@@ -9,7 +9,12 @@ dependencies = [
     "uvicorn[standard]==0.24.0",
     "python-multipart==0.0.6",
     "pydantic==2.5.0",
-    "whisperx @ file:///${PROJECT_ROOT}/../whisperX-custom",
+    "whisperx",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "whisperx[gpu]",
 ]
 
 [tool.uv.sources]
