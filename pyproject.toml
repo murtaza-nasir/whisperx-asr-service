@@ -2,7 +2,7 @@
 name = "whisperx-asr-service"
 version = "0.3.1"
 description = "FastAPI service wrapping WhisperX for ASR, alignment, and diarization"
-requires-python = ">=3.9, <3.14"
+requires-python = ">=3.10, <3.13"
 
 dependencies = [
     "fastapi==0.104.1",
