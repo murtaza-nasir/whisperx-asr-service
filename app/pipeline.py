@@ -36,6 +36,13 @@ CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
 
 _model_load_lock = threading.Lock()
+_transcribe_lock = threading.Lock()
+_diarize_lock = threading.Lock()
+
+# Track concurrent GPU operations so clear_gpu_memory() only calls
+# torch.cuda.empty_cache() when no other request is using the GPU.
+_gpu_in_flight = 0
+_gpu_in_flight_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Model caches
@@ -48,12 +55,35 @@ _diarize_pipeline: Optional[DiarizationPipeline] = None
 # ---------------------------------------------------------------------------
 # GPU helpers
 # ---------------------------------------------------------------------------
+def gpu_in_flight_enter():
+    """Increment the in-flight GPU request counter."""
+    global _gpu_in_flight
+    with _gpu_in_flight_lock:
+        _gpu_in_flight += 1
+
+
+def gpu_in_flight_exit():
+    """Decrement the in-flight GPU request counter."""
+    global _gpu_in_flight
+    with _gpu_in_flight_lock:
+        _gpu_in_flight -= 1
+
+
 def clear_gpu_memory():
-    """Clear GPU memory cache to prevent VRAM buildup."""
+    """Clear GPU memory cache to prevent VRAM buildup.
+
+    Always runs gc.collect(), but only calls torch.cuda.empty_cache() when no
+    other requests are currently using the GPU — avoids disrupting in-flight
+    CUDA operations from concurrent pipeline runs.
+    """
     if DEVICE == "cuda":
         gc.collect()
-        torch.cuda.empty_cache()
-        logger.debug("GPU memory cache cleared")
+        with _gpu_in_flight_lock:
+            if _gpu_in_flight == 0:
+                torch.cuda.empty_cache()
+                logger.debug("GPU memory cache cleared")
+            else:
+                logger.debug("Skipping empty_cache, %d GPU ops in flight", _gpu_in_flight)
 
 
 # ---------------------------------------------------------------------------
@@ -118,30 +148,37 @@ def transcribe(
     initial_prompt: Optional[str] = None,
     hotwords: Optional[str] = None,
 ) -> dict:
-    """Run WhisperX transcription and return raw result dict."""
+    """Run WhisperX transcription and return raw result dict.
+
+    Serialized via _transcribe_lock because the cached model singleton is not
+    thread-safe: per-request options (hotwords, initial_prompt) are mutated on
+    shared state, and upstream FasterWhisperPipeline.transcribe() mutates
+    self.tokenizer and self.options during execution.
+    """
     whisper_model = load_whisper_model(model_name)
 
-    # Set per-request options on the model's transcription options.
-    # The model is cached/shared, so we must reset after transcription.
-    if hotwords is not None:
-        whisper_model.options.hotwords = hotwords
-    if initial_prompt is not None:
-        whisper_model.options.initial_prompt = initial_prompt
-
-    transcribe_options: Dict[str, Any] = {
-        "batch_size": BATCH_SIZE,
-        "language": language,
-        "task": task,
-    }
-
-    logger.info("Starting transcription...")
-    try:
-        result = whisper_model.transcribe(audio, **transcribe_options)
-    finally:
+    with _transcribe_lock:
+        # Set per-request options on the model's transcription options.
+        # The model is cached/shared, so we must reset after transcription.
         if hotwords is not None:
-            whisper_model.options.hotwords = None
+            whisper_model.options.hotwords = hotwords
         if initial_prompt is not None:
-            whisper_model.options.initial_prompt = None
+            whisper_model.options.initial_prompt = initial_prompt
+
+        transcribe_options: Dict[str, Any] = {
+            "batch_size": BATCH_SIZE,
+            "language": language,
+            "task": task,
+        }
+
+        logger.info("Starting transcription...")
+        try:
+            result = whisper_model.transcribe(audio, **transcribe_options)
+        finally:
+            if hotwords is not None:
+                whisper_model.options.hotwords = None
+            if initial_prompt is not None:
+                whisper_model.options.initial_prompt = None
 
     detected_language = result.get("language", language or "en")
     logger.info(f"Transcription complete. Detected language: {detected_language}")
@@ -189,48 +226,52 @@ def diarize(
     Run pyannote speaker diarization and assign speakers to segments.
 
     Returns (result_with_speakers, speaker_embeddings_or_None).
+
+    Serialized via _diarize_lock as a precaution — pyannote internals are
+    not verified thread-safe.
     """
     if not HF_TOKEN:
         logger.warning("Speaker diarization requested but HF_TOKEN not set")
         return result, None
 
-    logger.info("Starting speaker diarization...")
-    speaker_embeddings = None
-    try:
-        diarize_model = load_diarize_pipeline()
+    with _diarize_lock:
+        logger.info("Starting speaker diarization...")
+        speaker_embeddings = None
+        try:
+            diarize_model = load_diarize_pipeline()
 
-        diarize_params: Dict[str, Any] = {}
-        if num_speakers is not None:
-            diarize_params["num_speakers"] = num_speakers
-            logger.info(f"Diarization with exact speaker count: {num_speakers}")
-        else:
-            if min_speakers is not None:
-                diarize_params["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                diarize_params["max_speakers"] = max_speakers
-            logger.info(f"Diarization with speaker range: {min_speakers}-{max_speakers}")
+            diarize_params: Dict[str, Any] = {}
+            if num_speakers is not None:
+                diarize_params["num_speakers"] = num_speakers
+                logger.info(f"Diarization with exact speaker count: {num_speakers}")
+            else:
+                if min_speakers is not None:
+                    diarize_params["min_speakers"] = min_speakers
+                if max_speakers is not None:
+                    diarize_params["max_speakers"] = max_speakers
+                logger.info(f"Diarization with speaker range: {min_speakers}-{max_speakers}")
 
-        if return_speaker_embeddings:
-            diarize_params["return_embeddings"] = True
-            logger.info("Speaker embeddings will be returned")
+            if return_speaker_embeddings:
+                diarize_params["return_embeddings"] = True
+                logger.info("Speaker embeddings will be returned")
 
-        diarize_output = diarize_model(audio, **diarize_params)
+            diarize_output = diarize_model(audio, **diarize_params)
 
-        if return_speaker_embeddings and isinstance(diarize_output, tuple):
-            diarize_segments, speaker_embeddings = diarize_output
-            logger.info(f"Received speaker embeddings for {len(speaker_embeddings)} speakers")
-        else:
-            diarize_segments = diarize_output
+            if return_speaker_embeddings and isinstance(diarize_output, tuple):
+                diarize_segments, speaker_embeddings = diarize_output
+                logger.info(f"Received speaker embeddings for {len(speaker_embeddings)} speakers")
+            else:
+                diarize_segments = diarize_output
 
-        if hasattr(diarize_segments, "exclusive_speaker_diarization"):
-            diarize_segments = diarize_segments.exclusive_speaker_diarization
-            logger.info("Using exclusive speaker diarization for better timestamp reconciliation")
+            if hasattr(diarize_segments, "exclusive_speaker_diarization"):
+                diarize_segments = diarize_segments.exclusive_speaker_diarization
+                logger.info("Using exclusive speaker diarization for better timestamp reconciliation")
 
-        result = whisperx.assign_word_speakers(diarize_segments, result)
-        logger.info("Speaker diarization complete")
-        clear_gpu_memory()
-    except Exception as e:
-        logger.warning(f"Speaker diarization failed: {e}, continuing without diarization")
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+            logger.info("Speaker diarization complete")
+            clear_gpu_memory()
+        except Exception as e:
+            logger.warning(f"Speaker diarization failed: {e}, continuing without diarization")
 
     return result, speaker_embeddings
 
@@ -288,28 +329,35 @@ def run_pipeline(
     Run the full 3-stage pipeline: transcribe -> align -> diarize.
 
     Returns (result, speaker_embeddings_or_None).
+
+    Tracks in-flight GPU operations so clear_gpu_memory() only calls
+    torch.cuda.empty_cache() when no other request is using the GPU.
     """
-    result = transcribe(
-        audio,
-        model_name=model_name,
-        language=language,
-        task=task,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-    )
-
-    if word_timestamps:
-        result = align(audio, result)
-
-    speaker_embeddings = None
-    if should_diarize:
-        result, speaker_embeddings = diarize(
+    gpu_in_flight_enter()
+    try:
+        result = transcribe(
             audio,
-            result,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            return_speaker_embeddings=return_speaker_embeddings,
+            model_name=model_name,
+            language=language,
+            task=task,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
         )
 
-    return result, speaker_embeddings
+        if word_timestamps:
+            result = align(audio, result)
+
+        speaker_embeddings = None
+        if should_diarize:
+            result, speaker_embeddings = diarize(
+                audio,
+                result,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                return_speaker_embeddings=return_speaker_embeddings,
+            )
+
+        return result, speaker_embeddings
+    finally:
+        gpu_in_flight_exit()
