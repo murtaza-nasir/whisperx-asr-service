@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "32"))
-GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
+GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "20"))
 
 # Thread pool for running blocking pipeline calls without blocking the event loop
 _executor = ThreadPoolExecutor(max_workers=GPU_CONCURRENCY)

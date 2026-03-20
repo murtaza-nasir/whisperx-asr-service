@@ -86,7 +86,7 @@ app/
 | `HF_TOKEN` | (required) | HuggingFace auth token |
 | `PRELOAD_MODEL` | large-v3 | Model to load on startup |
 | `PIPELINE_STRATEGY` | replicate | `replicate` or `split` (ray mode) |
-| `GPU_CONCURRENCY` | 1 | Concurrent GPU runs (simple mode) |
+| `GPU_CONCURRENCY` | 20 | Concurrent GPU runs (simple mode) |
 | `NUM_GPU_REPLICAS` | 1 | Pipeline replicas (ray mode) |
 | `UPLOAD_CHUNK_SIZE_BYTES` | 8388608 | Upload streaming chunk size (8MB) |
 
