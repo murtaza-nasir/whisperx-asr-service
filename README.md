@@ -561,6 +561,11 @@ MODEL_KEEP_ALIVE_SECONDS=0
 # Sweep frequency (floor of 30 seconds)
 MODEL_EVICTION_INTERVAL_SECONDS=60
 
+# GPU cache cleanup after each transcription (default true). false saves
+# ~130 ms per request on short clips at the cost of a few hundred MB of idle
+# VRAM. See "Lower Latency for Short Requests" below.
+# CLEAR_GPU_AFTER_TRANSCRIBE=true
+
 # Diarization hyperparameter tuning (optional, unset = model defaults).
 # See "Tuning Diarization Hyperparameters" above for details.
 # default 0.6; lower = split merged voices
@@ -610,6 +615,23 @@ Two optional limits protect the GPU on shared servers:
 - `MAX_LOADED_MODELS` caps the number of Whisper models kept in memory. Loading another model first unloads the least recently used model that no request is using. It combines with `MODEL_KEEP_ALIVE_SECONDS`, which unloads models after a period without use.
 
 The startup log shows the effective settings, for example `Models: default model: large-v3, preload: none`.
+
+### Lower Latency for Short Requests
+
+After each transcription the service clears the GPU cache (`gc.collect()` and `torch.cuda.empty_cache()`). On short clips this takes about as long as the transcription itself. For latency-sensitive use, such as dictation through `/v1/audio/transcriptions`, it can be turned off:
+
+```bash
+CLEAR_GPU_AFTER_TRANSCRIBE=false
+```
+
+Measured with `large-v3-turbo`, `float16`, on an RTX 5060 Ti (median of 5 requests, `language` set):
+
+| Clip | Default | `CLEAR_GPU_AFTER_TRANSCRIBE=false` |
+|------|---------|------------------------------------|
+| 2.5 s | 320 ms | 190 ms |
+| 9.2 s | 367 ms | 237 ms |
+
+The transcripts are identical. PyTorch keeps its cache between requests, so idle VRAM is a few hundred MB higher (about 2.7 GB instead of 2.3 GB in the test above) and stays there. Alignment, diarization and idle-model eviction still clear the cache as before; on a 63-minute meeting with diarization the output and peak VRAM were unchanged. Applies to the Whisper backend only.
 
 ### Serve Mode
 

@@ -95,6 +95,16 @@ MODEL_EVICTION_INTERVAL_SECONDS = max(
     30, _env_int("MODEL_EVICTION_INTERVAL_SECONDS", 60)
 )
 
+# GPU cache cleanup after each Whisper transcription (issue #35). On by
+# default. For short requests, gc.collect() + torch.cuda.empty_cache() take
+# about as long as the transcription itself (~130 ms on an RTX 5060 Ti), so
+# low-latency setups can turn it off; PyTorch then keeps its cache between
+# requests (a few hundred MB more VRAM at idle). Alignment, diarization and
+# idle-model eviction keep their own cleanup. Unset or empty means on.
+CLEAR_GPU_AFTER_TRANSCRIBE = os.getenv(
+    "CLEAR_GPU_AFTER_TRANSCRIBE", ""
+).strip().lower() not in ("0", "false", "no", "off")
+
 # Diarization hyperparameter tuning (pyannote community-1).
 # All unset by default -> the pipeline runs with the model's published defaults,
 # so behaviour is unchanged unless you opt in.
@@ -828,7 +838,8 @@ def transcribe(
     detected_language = result.get("language", language or "en")
     logger.info(f"Transcription complete. Detected language: {detected_language}")
 
-    clear_gpu_memory()
+    if CLEAR_GPU_AFTER_TRANSCRIBE:
+        clear_gpu_memory()
     return result
 
 
