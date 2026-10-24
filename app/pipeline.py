@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import whisperx
 from whisperx.diarize import DiarizationPipeline
+from app.alignment_preprocessing import prepare_alignment_model
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +648,7 @@ def load_align_model(language_code: str):
                     device=ALIGN_DEVICE,
                     model_dir=CACHE_DIR,
                 )
+                model_a = prepare_alignment_model(model_a, metadata, CACHE_DIR)
                 _align_models[language_code] = (model_a, metadata)
                 logger.info(f"Alignment model for {language_code} loaded")
     with _model_load_lock:
