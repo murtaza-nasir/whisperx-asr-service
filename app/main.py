@@ -18,7 +18,6 @@ import whisperx
 
 from app.version import __version__
 from app.pipeline import (
-    _env_int,
     DEVICE,
     COMPUTE_TYPE,
     BATCH_SIZE,
@@ -37,6 +36,7 @@ from app.pipeline import (
 )
 from app.queue import run_in_queue, get_queue_metrics
 from app import metrics as prom_metrics
+from app.security import SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB
 
 # Suppress pyannote pooling warnings about degrees of freedom
 warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
@@ -51,7 +51,6 @@ logging.basicConfig(
 logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 SERVE_MODE = os.getenv("SERVE_MODE", "simple")
 
 
@@ -74,7 +73,13 @@ app = FastAPI(
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
+
+# Shared HTTP security boundary (headers; auth/rate-limit/CORS added by later tickets).
+app.add_middleware(SecurityMiddleware)
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")

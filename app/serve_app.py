@@ -24,6 +24,7 @@ import whisperx
 from ray import serve
 
 from app.version import __version__
+from app.security import SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB
 from app.pipeline import (
     DEVICE,
     COMPUTE_TYPE,
@@ -62,8 +63,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
-
 # Model names are resolved by app.pipeline.resolve_model_name, shared with
 # the simple-mode endpoints.
 logger.info(f"Models: {describe_model_settings()}")
@@ -97,7 +96,13 @@ fastapi_app = FastAPI(
     title="WhisperX ASR API (Ray Serve)",
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
+
+# Shared HTTP security boundary (headers; auth/rate-limit/CORS added by later tickets).
+fastapi_app.add_middleware(SecurityMiddleware)
 
 
 @serve.deployment(
