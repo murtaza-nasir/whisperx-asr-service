@@ -25,7 +25,6 @@ from app.schemas import (
     OpenAIErrorResponse,
 )
 from app.pipeline import (
-    _env_int,
     DEVICE,
     BATCH_SIZE,
     CACHE_DIR,
@@ -41,14 +40,15 @@ from app.pipeline import (
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue
-from app.security import MAX_PROMPT_CHARS, ALLOW_LOCAL_MODEL_PATHS, sanitize_filename
-import app.security as _security
+from app.security import (MAX_PROMPT_CHARS, ALLOW_LOCAL_MODEL_PATHS, MAX_FILE_SIZE_MB,
+                          sanitize_filename, stream_upload_to_temp)
 sanitize_file_name = sanitize_filename
 sanitize_upload_filename = sanitize_filename
+_sanitize_filename = sanitize_filename
+_sanitise_filename = sanitize_filename
+stream_upload = stream_upload_to_temp
 
 logger = logging.getLogger(__name__)
-
-MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 
 router = APIRouter(prefix="/v1/audio", tags=["OpenAI Compatible"])
 models_router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
@@ -200,9 +200,8 @@ async def process_audio(
         # Validate model: every name /v1/models lists is accepted. The field
         # stays required, as in the OpenAI API; an empty value uses the
         # server's default model.
-        _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
         try:
-            whisperx_model = resolve_model_name(model, allow_local_paths=_allow_local)
+            whisperx_model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
         except InvalidModelError as e:
             return create_openai_error(400, str(e), param="model")
 
@@ -234,22 +233,9 @@ async def process_audio(
         os.close(fd)
         with open(temp_audio_path, "wb"):
             pass
-        total_bytes = 0
-        overflow = False
-        f = open(temp_audio_path, "wb")
         try:
-            while True:
-                chunk = await file.read(65536)
-                if not chunk:
-                    break
-                total_bytes += len(chunk)
-                if total_bytes > MAX_FILE_SIZE_MB * 1024 * 1024:
-                    overflow = True
-                    break
-                f.write(chunk)
-        finally:
-            f.close()
-        if overflow:
+            total_bytes = await stream_upload_to_temp(file, temp_audio_path, MAX_FILE_SIZE_MB)
+        except HTTPException as exc:
             if os.path.exists(temp_audio_path):
                 try:
                     os.unlink(temp_audio_path)
@@ -257,9 +243,9 @@ async def process_audio(
                     pass
             temp_audio_path = None
             return create_openai_error(
-                413,
-                f"File too large ({total_bytes / (1024 * 1024):.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
-                code="file_too_large"
+                exc.status_code,
+                exc.detail,
+                code="file_too_large",
             )
 
         file_size_mb = total_bytes / (1024 * 1024)

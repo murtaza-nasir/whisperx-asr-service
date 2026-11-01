@@ -28,9 +28,11 @@ from app.security import (
     SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, MAX_PROMPT_CHARS,
     ALLOW_LOCAL_MODEL_PATHS, sanitize_filename, stream_upload_to_temp,
 )
-import app.security as _security
 sanitize_file_name = sanitize_filename
 sanitize_upload_filename = sanitize_filename
+sanitize_upload_file_name = sanitize_filename
+_sanitize_filename = sanitize_filename
+_sanitise_filename = sanitize_filename
 stream_upload = stream_upload_to_temp
 from app.pipeline import (
     DEVICE,
@@ -233,9 +235,8 @@ class ASRIngress:
             # to canonical faster-whisper names so /asr accepts the same identifiers
             # advertised by /v1/models. No model means the default model; an
             # unknown one is a client error.
-            _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
             try:
-                model = resolve_model_name(model, allow_local_paths=_allow_local)
+                model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
             except InvalidModelError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -417,7 +418,7 @@ class ASRIngress:
         temp_audio_path = None
         try:
             try:
-                whisperx_model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False))
+                whisperx_model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
             except InvalidModelError as e:
                 return create_openai_error(400, str(e), param="model")
 
@@ -442,22 +443,9 @@ class ASRIngress:
             os.close(fd)
             with open(temp_audio_path, "wb"):
                 pass
-            total_bytes = 0
-            overflow = False
-            f = open(temp_audio_path, "wb")
             try:
-                while True:
-                    chunk = await file.read(65536)
-                    if not chunk:
-                        break
-                    total_bytes += len(chunk)
-                    if total_bytes > MAX_FILE_SIZE_MB * 1024 * 1024:
-                        overflow = True
-                        break
-                    f.write(chunk)
-            finally:
-                f.close()
-            if overflow:
+                total_bytes = await stream_upload_to_temp(file, temp_audio_path, MAX_FILE_SIZE_MB)
+            except HTTPException as exc:
                 if os.path.exists(temp_audio_path):
                     try:
                         os.unlink(temp_audio_path)
@@ -465,7 +453,8 @@ class ASRIngress:
                         pass
                 temp_audio_path = None
                 return create_openai_error(
-                    413, f"File too large ({total_bytes / (1024 * 1024):.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
+                    exc.status_code,
+                    exc.detail,
                     code="file_too_large",
                 )
 

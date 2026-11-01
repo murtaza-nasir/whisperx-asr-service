@@ -140,6 +140,15 @@ def _check_rate_limit(client_ip: str) -> Optional[int]:
         return None
     window = max(1, RATE_LIMIT_WINDOW_SECONDS)
     now = time.monotonic()
+    # Prune stale buckets so the in-memory state cannot grow without bound
+    # under rotating/spoofed client addresses.
+    if len(_RATE_LIMIT_BUCKETS) > 1024:
+        stale = [
+            key for key, b in _RATE_LIMIT_BUCKETS.items()
+            if not b or now - b[-1] >= window
+        ]
+        for key in stale:
+            del _RATE_LIMIT_BUCKETS[key]
     bucket = _RATE_LIMIT_BUCKETS.get(client_ip)
     if bucket is None:
         bucket = deque()
@@ -155,10 +164,20 @@ def _check_rate_limit(client_ip: str) -> Optional[int]:
     return None
 
 
+def _tls_active(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    if TRUST_PROXY:
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").strip().lower()
+        if forwarded_proto == "https":
+            return True
+    return False
+
+
 def _apply_security_headers(response: Response, request: Request) -> None:
     for header, value in SECURITY_HEADERS.items():
         response.headers[header] = value
-    if request.url.scheme == "https":
+    if _tls_active(request):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
@@ -278,10 +297,11 @@ def sanitize_filename(name: Optional[str]) -> str:
 
 sanitize_file_name = sanitize_filename
 sanitize_upload_filename = sanitize_filename
+_sanitize_filename = sanitize_filename
 _sanitise_filename = sanitize_filename
 
 
-async def stream_upload_to_temp(upload_file, temp_path: str, max_file_size_mb: int = None,
+async def stream_upload_to_temp(upload_file, temp_path: str, max_file_size_mb: Optional[int] = None,
                                chunk_size: int = _UPLOAD_CHUNK_SIZE) -> int:
     """Stream an uploaded file to temp_path in chunks."""
     if max_file_size_mb is None:

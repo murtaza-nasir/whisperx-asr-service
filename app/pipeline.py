@@ -258,7 +258,7 @@ def _map_alias(name: str) -> str:
     return name
 
 
-def is_loadable_model(name: str, allow_local_paths: bool = True) -> bool:
+def is_loadable_model(name: str, allow_local_paths: bool = False) -> bool:
     """True for names faster-whisper can load: canonical sizes, `org/repo`
     Hugging Face ids and, when allow_local_paths is true, existing local
     model directories."""
@@ -311,7 +311,7 @@ for _entry in (_env_or_none("ALLOWED_MODELS") or "").split(","):
             ALLOWED_MODELS.append(_mapped)
 
 
-def resolve_model_name(model: Optional[str], allow_local_paths: bool = True) -> str:
+def resolve_model_name(model: Optional[str], allow_local_paths: bool = False) -> str:
     """
     Resolve a user-supplied model identifier to the name the engine loads.
 
@@ -365,7 +365,7 @@ def describe_model_settings() -> str:
 if _CONFIGURED_DEFAULT_MODEL != DEFAULT_MODEL:
     logger.info(f"Default model {_CONFIGURED_DEFAULT_MODEL!r} resolves to {DEFAULT_MODEL!r}")
 for _entry in ALLOWED_MODELS:
-    if not is_loadable_model(_entry):
+    if not is_loadable_model(_entry, allow_local_paths=True):
         logger.warning(f"ALLOWED_MODELS entry {_entry!r} is not a model this service can load")
 
 
@@ -802,7 +802,7 @@ def transcribe(
             "using whisper backend for this request"
         )
 
-    model_name = resolve_model_name(model_name)
+    model_name = resolve_model_name(model_name, allow_local_paths=True)
     transcribe_options: Dict[str, Any] = {
         "batch_size": BATCH_SIZE,
         "language": language,

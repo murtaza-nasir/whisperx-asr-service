@@ -40,10 +40,11 @@ from app.security import (
     SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, MAX_PROMPT_CHARS,
     ALLOW_LOCAL_MODEL_PATHS, sanitize_filename, stream_upload_to_temp,
 )
-import app.security as _security
 # Re-export security helpers for tests that import them from this module.
 sanitize_file_name = sanitize_filename
 sanitize_upload_filename = sanitize_filename
+_sanitize_filename = sanitize_filename
+_sanitise_filename = sanitize_filename
 stream_upload = stream_upload_to_temp
 
 # Suppress pyannote pooling warnings about degrees of freedom
@@ -92,8 +93,7 @@ app.add_middleware(SecurityMiddleware)
 
 @app.exception_handler(Exception)
 async def _generic_exception_handler(request, exc):
-    import logging
-    logging.getLogger(__name__).exception("Unhandled exception: %s", exc)
+    logger.exception("Unhandled exception: %s", exc)
     if str(request.url.path).startswith("/v1/audio/"):
         return JSONResponse(
             status_code=500,
@@ -181,9 +181,8 @@ async def transcribe_audio(
         # to canonical faster-whisper names so /asr accepts the same identifiers
         # advertised by /v1/models. No model means the default model; an
         # unknown one is a client error.
-        _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
         try:
-            model = resolve_model_name(model, allow_local_paths=_allow_local)
+            model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
         except InvalidModelError as e:
             raise HTTPException(status_code=400, detail=str(e))
 

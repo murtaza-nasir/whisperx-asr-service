@@ -589,7 +589,16 @@ docker compose logs --tail=10
 
 ## Security Notes
 
-**This service has NO authentication or security features.**
+The service ships an optional, environment-driven security layer (all off by
+default). When enabled it requires an API key on `/asr`, `/v1/audio/*`,
+`/metrics` and `/queue-metrics`, applies per-IP rate limiting, restricts
+browser origins, emits security headers, streams uploads with a size cap,
+limits prompt/hotwords length, restricts the `model` parameter to known
+names, returns generic 500 errors, and can hide interactive docs. See
+`.env.example` (Security section) and the README "Security Notes" for the
+full variable list (`API_KEY`/`API_KEYS`, `RATE_LIMIT_REQUESTS`,
+`RATE_LIMIT_WINDOW_SECONDS`, `ALLOWED_ORIGINS`, `MAX_PROMPT_CHARS`,
+`ALLOW_LOCAL_MODEL_PATHS`, `ENABLE_DOCS`, `TRUST_PROXY`).
 
 Basic protection:
 ```bash
@@ -600,7 +609,8 @@ sudo ufw deny 9000/tcp
 # Store HF_TOKEN in .env file, not hardcoded
 ```
 
-For internet exposure, you'll need to add your own reverse proxy and authentication.
+For internet exposure, set `API_KEY` (or `API_KEYS`) and put the service
+behind a reverse proxy for TLS and global rate limiting.
 
 ---
 
