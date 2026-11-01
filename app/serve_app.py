@@ -101,7 +101,8 @@ fastapi_app = FastAPI(
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 
-# Shared HTTP security boundary (headers; auth/rate-limit/CORS added by later tickets).
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
+# Rate limiting is per ingress process in Ray Serve mode.
 fastapi_app.add_middleware(SecurityMiddleware)
 
 

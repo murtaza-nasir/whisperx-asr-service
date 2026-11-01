@@ -78,7 +78,7 @@ app = FastAPI(
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 
-# Shared HTTP security boundary (headers; auth/rate-limit/CORS added by later tickets).
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
 app.add_middleware(SecurityMiddleware)
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
