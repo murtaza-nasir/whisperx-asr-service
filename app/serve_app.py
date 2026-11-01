@@ -24,6 +24,16 @@ import whisperx
 from ray import serve
 
 from app.version import __version__
+from app.security import (
+    SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, MAX_PROMPT_CHARS,
+    ALLOW_LOCAL_MODEL_PATHS, sanitize_filename, stream_upload_to_temp,
+)
+sanitize_file_name = sanitize_filename
+sanitize_upload_filename = sanitize_filename
+sanitize_upload_file_name = sanitize_filename
+_sanitize_filename = sanitize_filename
+_sanitise_filename = sanitize_filename
+stream_upload = stream_upload_to_temp
 from app.pipeline import (
     DEVICE,
     COMPUTE_TYPE,
@@ -62,8 +72,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
-
 # Model names are resolved by app.pipeline.resolve_model_name, shared with
 # the simple-mode endpoints.
 logger.info(f"Models: {describe_model_settings()}")
@@ -97,7 +105,25 @@ fastapi_app = FastAPI(
     title="WhisperX ASR API (Ray Serve)",
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
+
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
+# Rate limiting is per ingress process in Ray Serve mode.
+fastapi_app.add_middleware(SecurityMiddleware)
+
+
+@fastapi_app.exception_handler(Exception)
+async def _generic_exception_handler(request, exc):
+    logger.exception("Unhandled exception: %s", exc)
+    if str(request.url.path).startswith("/v1/audio/"):
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "server_error"}},
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @serve.deployment(
@@ -199,12 +225,18 @@ class ASRIngress:
             if output is not None:
                 output_format = output
 
+            # Validate prompt lengths.
+            if initial_prompt is not None and len(initial_prompt) > MAX_PROMPT_CHARS:
+                raise HTTPException(status_code=400, detail=f"initial_prompt exceeds {MAX_PROMPT_CHARS} characters")
+            if hotwords is not None and len(hotwords) > MAX_PROMPT_CHARS:
+                raise HTTPException(status_code=400, detail=f"hotwords exceeds {MAX_PROMPT_CHARS} characters")
+
             # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
             # to canonical faster-whisper names so /asr accepts the same identifiers
             # advertised by /v1/models. No model means the default model; an
             # unknown one is a client error.
             try:
-                model = resolve_model_name(model)
+                model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
             except InvalidModelError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -215,20 +247,26 @@ class ASRIngress:
             if return_speaker_embeddings is None:
                 return_speaker_embeddings = False
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio_file.filename).suffix) as temp_file:
-                temp_audio_path = temp_file.name
-                content = await audio_file.read()
-                temp_file.write(content)
+            suffix = Path(audio_file.filename).suffix if audio_file.filename else ""
+            fd, temp_audio_path = tempfile.mkstemp(suffix=suffix)
+            os.close(fd)
+            with open(temp_audio_path, "wb"):
+                pass
+            try:
+                total_bytes = await stream_upload_to_temp(audio_file, temp_audio_path, MAX_FILE_SIZE_MB)
+            except Exception:
+                if temp_audio_path and os.path.exists(temp_audio_path):
+                    try:
+                        os.unlink(temp_audio_path)
+                    except OSError:
+                        pass
+                temp_audio_path = None
+                raise
 
-            file_size_mb = len(content) / (1024 * 1024)
+            file_size_mb = total_bytes / (1024 * 1024)
             prom_metrics.AUDIO_SIZE_MB.observe(file_size_mb)
-            if file_size_mb > MAX_FILE_SIZE_MB:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large ({file_size_mb:.1f}MB). Maximum allowed: {MAX_FILE_SIZE_MB}MB.",
-                )
 
-            logger.info(f"Processing {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}")
+            logger.info(f"Processing {sanitize_filename(audio_file.filename)} ({file_size_mb:.1f}MB), model: {model}")
             audio = whisperx.load_audio(temp_audio_path)
             prom_metrics.AUDIO_DURATION.observe(len(audio) / 16000.0)
 
@@ -285,8 +323,8 @@ class ASRIngress:
             metric_status = f"http_{e.status_code}"
             raise
         except Exception as e:
-            logger.error(f"Transcription error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.exception("Transcription error: %s", e)
+            raise HTTPException(status_code=500, detail="Internal server error")
         finally:
             prom_metrics.ACTIVE_TRANSCRIPTIONS.dec()
             prom_metrics.REQUEST_DURATION.labels(endpoint="/asr").observe(time.time() - request_started)
@@ -380,9 +418,14 @@ class ASRIngress:
         temp_audio_path = None
         try:
             try:
-                whisperx_model = resolve_model_name(model)
+                whisperx_model = resolve_model_name(model, allow_local_paths=ALLOW_LOCAL_MODEL_PATHS)
             except InvalidModelError as e:
                 return create_openai_error(400, str(e), param="model")
+
+            if prompt is not None and len(prompt) > MAX_PROMPT_CHARS:
+                return create_openai_error(400, f"prompt exceeds {MAX_PROMPT_CHARS} characters", param="prompt")
+            if hotwords is not None and len(hotwords) > MAX_PROMPT_CHARS:
+                return create_openai_error(400, f"hotwords exceeds {MAX_PROMPT_CHARS} characters", param="hotwords")
 
             if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
                 return create_openai_error(
@@ -396,21 +439,30 @@ class ASRIngress:
                                            param="temperature")
 
             suffix = Path(file.filename).suffix if file.filename else ".wav"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                temp_audio_path = temp_file.name
-                content = await file.read()
-                temp_file.write(content)
-
-            file_size_mb = len(content) / (1024 * 1024)
-            if file_size_mb > MAX_FILE_SIZE_MB:
+            fd, temp_audio_path = tempfile.mkstemp(suffix=suffix)
+            os.close(fd)
+            with open(temp_audio_path, "wb"):
+                pass
+            try:
+                total_bytes = await stream_upload_to_temp(file, temp_audio_path, MAX_FILE_SIZE_MB)
+            except HTTPException as exc:
+                if os.path.exists(temp_audio_path):
+                    try:
+                        os.unlink(temp_audio_path)
+                    except OSError:
+                        pass
+                temp_audio_path = None
                 return create_openai_error(
-                    413, f"File too large ({file_size_mb:.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
+                    exc.status_code,
+                    exc.detail,
                     code="file_too_large",
                 )
 
+            file_size_mb = total_bytes / (1024 * 1024)
+
             effective_hotwords = hotwords or prompt
 
-            logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
+            logger.info(f"OpenAI-compat: Processing {sanitize_filename(file.filename)} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
 
             audio = whisperx.load_audio(temp_audio_path)
             duration = len(audio) / 16000
@@ -516,8 +568,8 @@ class ASRIngress:
         except HTTPException as e:
             return create_openai_error(e.status_code, e.detail)
         except Exception as e:
-            logger.error(f"OpenAI-compat error: {e}", exc_info=True)
-            return create_openai_error(500, f"Internal server error: {e}",
+            logger.exception("OpenAI-compat error: %s", e)
+            return create_openai_error(500, "Internal server error",
                                        error_type="server_error")
         finally:
             if temp_audio_path and os.path.exists(temp_audio_path):

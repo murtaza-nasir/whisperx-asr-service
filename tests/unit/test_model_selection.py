@@ -115,7 +115,7 @@ def test_resolve_model_name(fresh, tmp_path):
     assert p.resolve_model_name("whisper-medium.en") == "medium.en"
     assert p.resolve_model_name("whisper-1") == "large-v3"
     assert p.resolve_model_name("Systran/faster-whisper-small") == "Systran/faster-whisper-small"
-    assert p.resolve_model_name(str(tmp_path)) == str(tmp_path)
+    assert p.resolve_model_name(str(tmp_path), allow_local_paths=True) == str(tmp_path)
     for bad in ("large-v4", "whisper-2", "a/b/c", "not a model"):
         with pytest.raises(p.InvalidModelError) as err:
             p.resolve_model_name(bad)

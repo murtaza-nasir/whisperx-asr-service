@@ -585,6 +585,25 @@ MODEL_EVICTION_INTERVAL_SECONDS=60
 # compared to previous releases).
 # RESEGMENT_BY_SPEAKER=true
 
+# Security (optional, all off by default). See "Security Notes" below.
+# API key on protected paths (/asr, /v1/audio/*, /metrics, /queue-metrics);
+# unset disables authentication. Accepted via Bearer or X-API-Key.
+# API_KEY=change-me
+# API_KEYS=key1,key2
+# Per-IP rate limiting on transcription endpoints; 0 disables.
+# RATE_LIMIT_REQUESTS=0
+# RATE_LIMIT_WINDOW_SECONDS=60
+# Comma-separated browser-origin allowlist; empty disables CORS.
+# ALLOWED_ORIGINS=http://localhost:3000
+# Max length (chars) of prompt/hotwords inputs.
+# MAX_PROMPT_CHARS=4096
+# Allow local model paths in the model parameter (default false).
+# ALLOW_LOCAL_MODEL_PATHS=false
+# Expose interactive docs and OpenAPI (default true).
+# ENABLE_DOCS=true
+# Trust X-Forwarded-* headers behind a reverse proxy.
+# TRUST_PROXY=false
+
 # Experimental Qwen3-ASR backend (see "Qwen3-ASR Backend" below).
 # ASR_BACKEND=qwen3
 # QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B-hf
@@ -1160,11 +1179,17 @@ The service supports formats that WhisperX can process (via FFmpeg):
 
 ## Security Notes
 
-**This service has NO built-in authentication or security features.**
+The service now ships an optional, environment-driven security layer (see `.env.example`):
+`API_KEY`/`API_KEYS`, `RATE_LIMIT_REQUESTS`/`RATE_LIMIT_WINDOW_SECONDS`,
+`ALLOWED_ORIGINS`, `MAX_PROMPT_CHARS`, `ALLOW_LOCAL_MODEL_PATHS`, `ENABLE_DOCS`,
+`TRUST_PROXY`. All protections are off by default; when `API_KEY` is unset the
+service behaves as before. `/health`, `/`, `/v1/models` and `/v1/models/{id}`
+stay open; HSTS is emitted only when TLS is active.
 
 If exposing to a network:
-- Use firewall rules to restrict access
-- Consider putting behind a reverse proxy
+- Set `API_KEY` (or `API_KEYS`) to require credentials on `/asr`, `/v1/audio/*`, `/metrics`, `/queue-metrics`
+- Use `RATE_LIMIT_REQUESTS` for per-IP limiting (per process in Ray mode)
+- Put behind a reverse proxy for TLS and global rate limiting
 - Store HF_TOKEN securely (use `.env` file, not hardcoded)
 
 ## Maintenance
