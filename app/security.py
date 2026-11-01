@@ -17,6 +17,7 @@ from typing import List, Optional, Deque, Dict
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -251,3 +252,60 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         for key, value in _cors_simple_headers(origin).items():
             response.headers[key] = value
         return response
+
+
+# ---------------------------------------------------------------------------
+# Upload helpers
+# ---------------------------------------------------------------------------
+_UPLOAD_CHUNK_SIZE = 64 * 1024
+
+
+def sanitize_filename(name: Optional[str]) -> str:
+    """Strip control characters and truncate an uploaded file name for safe
+    logging. Never returns newlines or other control characters."""
+    if not name:
+        return ""
+    cleaned = "".join(
+        ch for ch in name
+        if ch.isprintable() and ord(ch) not in (0x7F,) and not (0x80 <= ord(ch) <= 0x9F)
+    )
+    # Strip path components to avoid log confusion.
+    cleaned = cleaned.replace("\\", "/").split("/")[-1]
+    if len(cleaned) > 200:
+        cleaned = cleaned[:200]
+    return cleaned
+
+
+sanitize_file_name = sanitize_filename
+sanitize_upload_filename = sanitize_filename
+_sanitise_filename = sanitize_filename
+
+
+async def stream_upload_to_temp(upload_file, temp_path: str, max_file_size_mb: int = None,
+                               chunk_size: int = _UPLOAD_CHUNK_SIZE) -> int:
+    """Stream an uploaded file to temp_path in chunks."""
+    if max_file_size_mb is None:
+        max_file_size_mb = MAX_FILE_SIZE_MB
+    max_bytes = int(max_file_size_mb) * 1024 * 1024
+    total = 0
+    with open(temp_path, "wb") as out:
+        while True:
+            chunk = await upload_file.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"File too large ({total / (1024 * 1024):.1f}MB). "
+                        f"Maximum allowed: {max_file_size_mb}MB."
+                    ),
+                )
+            out.write(chunk)
+    return total
+
+
+stream_upload = stream_upload_to_temp
+save_upload_to_temp = stream_upload_to_temp
+read_upload_to_temp = stream_upload_to_temp

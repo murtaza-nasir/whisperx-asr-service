@@ -41,6 +41,10 @@ from app.pipeline import (
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue
+from app.security import MAX_PROMPT_CHARS, ALLOW_LOCAL_MODEL_PATHS, sanitize_filename
+import app.security as _security
+sanitize_file_name = sanitize_filename
+sanitize_upload_filename = sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -196,10 +200,17 @@ async def process_audio(
         # Validate model: every name /v1/models lists is accepted. The field
         # stays required, as in the OpenAI API; an empty value uses the
         # server's default model.
+        _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
         try:
-            whisperx_model = resolve_model_name(model)
+            whisperx_model = resolve_model_name(model, allow_local_paths=_allow_local)
         except InvalidModelError as e:
             return create_openai_error(400, str(e), param="model")
+
+        # Validate prompt/hotwords length.
+        if prompt is not None and len(prompt) > MAX_PROMPT_CHARS:
+            return create_openai_error(400, f"prompt exceeds {MAX_PROMPT_CHARS} characters", param="prompt")
+        if hotwords is not None and len(hotwords) > MAX_PROMPT_CHARS:
+            return create_openai_error(400, f"hotwords exceeds {MAX_PROMPT_CHARS} characters", param="hotwords")
 
         # Validate timestamp_granularities requires verbose_json
         if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
@@ -217,23 +228,43 @@ async def process_audio(
                 param="temperature"
             )
 
-        # Save uploaded file to temporary location
+        # Save uploaded file to temporary location (streamed in chunks)
         suffix = Path(file.filename).suffix if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            temp_audio_path = temp_file.name
-            content = await file.read()
-            temp_file.write(content)
-
-        # Check file size
-        file_size_mb = len(content) / (1024 * 1024)
-        if file_size_mb > MAX_FILE_SIZE_MB:
+        fd, temp_audio_path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        with open(temp_audio_path, "wb"):
+            pass
+        total_bytes = 0
+        overflow = False
+        f = open(temp_audio_path, "wb")
+        try:
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_FILE_SIZE_MB * 1024 * 1024:
+                    overflow = True
+                    break
+                f.write(chunk)
+        finally:
+            f.close()
+        if overflow:
+            if os.path.exists(temp_audio_path):
+                try:
+                    os.unlink(temp_audio_path)
+                except OSError:
+                    pass
+            temp_audio_path = None
             return create_openai_error(
                 413,
-                f"File too large ({file_size_mb:.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
+                f"File too large ({total_bytes / (1024 * 1024):.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
                 code="file_too_large"
             )
 
-        logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
+        file_size_mb = total_bytes / (1024 * 1024)
+
+        logger.info(f"OpenAI-compat: Processing {sanitize_filename(file.filename)} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
 
         # Load audio
         audio = whisperx.load_audio(temp_audio_path)
@@ -300,10 +331,10 @@ async def process_audio(
         return create_openai_error(e.status_code, e.detail)
 
     except Exception as e:
-        logger.error(f"OpenAI-compat error: {str(e)}", exc_info=True)
+        logger.exception("OpenAI-compat error: %s", e)
         return create_openai_error(
             500,
-            f"Internal server error: {str(e)}",
+            "Internal server error",
             error_type="server_error"
         )
 

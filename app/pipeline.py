@@ -258,15 +258,16 @@ def _map_alias(name: str) -> str:
     return name
 
 
-def is_loadable_model(name: str) -> bool:
+def is_loadable_model(name: str, allow_local_paths: bool = True) -> bool:
     """True for names faster-whisper can load: canonical sizes, `org/repo`
-    Hugging Face ids and existing local model directories."""
+    Hugging Face ids and, when allow_local_paths is true, existing local
+    model directories."""
     if not name:
         return False
     return (
         name in set(get_canonical_models())
         or _is_hf_repo_id(name)
-        or os.path.isdir(name)
+        or (allow_local_paths and os.path.isdir(name))
     )
 
 
@@ -310,22 +311,22 @@ for _entry in (_env_or_none("ALLOWED_MODELS") or "").split(","):
             ALLOWED_MODELS.append(_mapped)
 
 
-def resolve_model_name(model: Optional[str]) -> str:
+def resolve_model_name(model: Optional[str], allow_local_paths: bool = True) -> str:
     """
     Resolve a user-supplied model identifier to the name the engine loads.
 
     Empty or whitespace falls back to DEFAULT_MODEL. Canonical names
     (tiny, large-v3, distil-medium.en, ...) pass through; OpenAI-style aliases
     (whisper-1, whisper-large-v3, ...) map to canonical names. Hugging Face
-    ids (org/repo) and local model directories are accepted. Anything else,
-    or a model outside ALLOWED_MODELS, raises InvalidModelError, which the
-    endpoints return as HTTP 400.
+    ids (org/repo) and, when allow_local_paths is true, local model directories
+    are accepted. Anything else, or a model outside ALLOWED_MODELS, raises
+    InvalidModelError, which the endpoints return as HTTP 400.
     """
     name = (model or "").strip()
     if not name:
         return DEFAULT_MODEL
     resolved = _map_alias(name)
-    if not is_loadable_model(resolved):
+    if not is_loadable_model(resolved, allow_local_paths=allow_local_paths):
         raise InvalidModelError(
             f"Unknown model {name!r}. Accepted: {', '.join(list_available_models())}, "
             "a Hugging Face id (org/repo) or a local model directory."
