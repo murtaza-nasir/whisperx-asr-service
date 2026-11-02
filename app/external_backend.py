@@ -20,7 +20,6 @@ opt-in and off unless ASR_BACKEND=external is set.
 import base64
 import io
 import logging
-import os
 import time
 import wave
 from typing import List, Optional, Tuple
@@ -30,14 +29,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from app.env import env_str as _env
+
 SAMPLE_RATE = 16000
-
-
-def _env(name: str, default: str = "") -> str:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    return value.strip()
 
 
 BASE_URL = _env("EXTERNAL_ASR_BASE_URL").rstrip("/")

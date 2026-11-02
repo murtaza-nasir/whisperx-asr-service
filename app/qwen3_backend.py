@@ -20,6 +20,8 @@ import threading
 import time
 from typing import List, Optional, Tuple
 
+from app.env import env_str as _env_or_default
+
 import numpy as np
 import torch
 
@@ -35,13 +37,6 @@ MAX_NEW_TOKENS = 4096
 TOKENS_PER_SECOND_CAP = 20
 
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-
-
-def _env_or_default(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    return value.strip()
 
 
 ASR_MODEL_ID = _env_or_default("QWEN3_ASR_MODEL", "Qwen/Qwen3-ASR-1.7B-hf")
