@@ -27,36 +27,18 @@ import torch
 import whisperx
 from whisperx.diarize import DiarizationPipeline
 
+from app.env import (
+    env_or_none as _env_or_none,
+    env_int as _env_int,
+    env_float as _env_float,
+)
+
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration (read once at import time, same as before)
 # ---------------------------------------------------------------------------
-def _env_or_none(name: str) -> Optional[str]:
-    """Read an env var, treating unset OR empty/whitespace as None.
-
-    Compose forwards optional vars as `${VAR:-}`, which sets them to an empty
-    string rather than leaving them unset, so a plain os.getenv() would return
-    "" and downstream float() would crash. Normalize that to None here.
-    """
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return None
-    return value.strip()
-
-
-def _env_int(name: str, default: int) -> int:
-    """Integer env var; unset, empty or unparseable values give the default."""
-    value = _env_or_none(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        logger.warning(f"{name}={value!r} is not an integer; using {default}")
-        return default
-
-
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
 BATCH_SIZE = _env_int("BATCH_SIZE", 16 if DEVICE == "cuda" else 2)
@@ -133,22 +115,6 @@ DIARIZE_PARAM_OVERRIDES = _env_or_none("DIARIZE_PARAM_OVERRIDES")
 # The batched WhisperX pipeline does not apply Whisper's no_speech,
 # log_prob or compression-ratio thresholds, so the VAD is the setting that
 # acts on noise. The settings are read at model load; restart to change them.
-def _env_float(name: str, low: float, high: float) -> Optional[float]:
-    """Float env var strictly between low and high; otherwise None, with a warning."""
-    value = _env_or_none(name)
-    if value is None:
-        return None
-    try:
-        number = float(value)
-    except ValueError:
-        logger.warning(f"{name}={value!r} is not a number; using the WhisperX default")
-        return None
-    if not low < number < high:
-        logger.warning(f"{name}={value!r} is outside {low}-{high}; using the WhisperX default")
-        return None
-    return number
-
-
 VAD_METHOD = (_env_or_none("VAD_METHOD") or "").lower() or None
 if VAD_METHOD not in (None, "pyannote", "silero"):
     logger.warning(f"VAD_METHOD={VAD_METHOD!r} is not pyannote or silero; using the WhisperX default")

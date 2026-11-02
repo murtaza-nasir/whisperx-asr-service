@@ -7,25 +7,12 @@ at a time.  Used when SERVE_MODE=simple (default).
 
 import asyncio
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
+from app.env import env_int as _env_int
+
 logger = logging.getLogger(__name__)
-
-
-
-def _env_int(name: str, default: int) -> int:
-    """Integer env var; unset, empty or unparseable values give the default.
-    (Same rule as app.pipeline._env_int; kept local so this module stays
-    free of the ML imports.)"""
-    value = (os.getenv(name) or "").strip()
-    try:
-        return int(value) if value else default
-    except ValueError:
-        logger.warning(f"{name}={value!r} is not an integer; using {default}")
-        return default
-
 
 MAX_QUEUE_SIZE = _env_int("MAX_QUEUE_SIZE", 32)
 GPU_CONCURRENCY = _env_int("GPU_CONCURRENCY", 1)
