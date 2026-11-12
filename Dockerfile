@@ -93,7 +93,7 @@ RUN chmod +x /workspace/entrypoint.sh
 EXPOSE 9000 8265
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import requests; requests.get('http://localhost:9000/health')" || exit 1
+    CMD python3 -c "import sys, requests; r = requests.get('http://localhost:9000/health', timeout=8); sys.exit(r.status_code != 200)"
 
 ENV SERVE_MODE=simple
 

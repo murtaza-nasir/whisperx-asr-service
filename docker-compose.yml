@@ -24,8 +24,13 @@ services:
       # "Ray Dashboard Access".
       - "127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265"
 
-    # Ray uses /dev/shm for object store
+    
+    # Ray mode: /dev/shm holds only the object store (RAY_OBJECT_STORE_MEMORY,
+    # 4 GB by default). Ray's session files and logs go to a separate small
+    # tmpfs (RAY_TMPDIR), so they cannot fill shared memory.
     shm_size: '8g'
+    tmpfs:
+      - /ray-tmp:size=2g,exec
 
     environment:
       # Suppress pyannote's torchcodec UserWarning in all processes (including Ray workers)
@@ -46,6 +51,26 @@ services:
       - ALLOWED_MODELS=${ALLOWED_MODELS:-}
       - MAX_LOADED_MODELS=${MAX_LOADED_MODELS:-}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
+      # Admission control by audio length (0 = off; see README "Long Files and Overload")
+      - MAX_AUDIO_SECONDS=${MAX_AUDIO_SECONDS:-0}
+      - MAX_INFLIGHT_AUDIO_SECONDS=${MAX_INFLIGHT_AUDIO_SECONDS:-0}
+      - MAX_QUEUED_AUDIO_SECONDS=${MAX_QUEUED_AUDIO_SECONDS:-0}
+      - MAX_QUEUED_REQUESTS=${MAX_QUEUED_REQUESTS:-0}
+      - QUEUE_WAIT_TIMEOUT_SECONDS=${QUEUE_WAIT_TIMEOUT_SECONDS:-0}
+      # Per-request working files (upload and decoded audio)
+      - JOB_DIR=${JOB_DIR:-/tmp/whisperx-jobs}
+      - JOB_TTL_SECONDS=${JOB_TTL_SECONDS:-86400}
+      # Health checks and the watchdog that restarts an unhealthy container
+      - HEALTH_MIN_SHM_FREE_PCT=${HEALTH_MIN_SHM_FREE_PCT:-5}
+      - HEALTH_MIN_DISK_FREE_MB=${HEALTH_MIN_DISK_FREE_MB:-500}
+      - HEALTH_STAGE_TIMEOUT_SECONDS=${HEALTH_STAGE_TIMEOUT_SECONDS:-5}
+      - WATCHDOG_ENABLED=${WATCHDOG_ENABLED:-true}
+      - WATCHDOG_INTERVAL_SECONDS=${WATCHDOG_INTERVAL_SECONDS:-30}
+      - WATCHDOG_FAILURES=${WATCHDOG_FAILURES:-6}
+      - WATCHDOG_TIMEOUT_SECONDS=${WATCHDOG_TIMEOUT_SECONDS:-10}
+      - WATCHDOG_SHM_MAX_USED_PCT=${WATCHDOG_SHM_MAX_USED_PCT:-98}
+      - WATCHDOG_SHM_FAILURES=${WATCHDOG_SHM_FAILURES:-4}
+      - DIARIZE_ON_ERROR=${DIARIZE_ON_ERROR:-flag}
       # Idle model eviction (0 disables; see README)
       - MODEL_KEEP_ALIVE_SECONDS=${MODEL_KEEP_ALIVE_SECONDS:-0}
       - MODEL_EVICTION_INTERVAL_SECONDS=${MODEL_EVICTION_INTERVAL_SECONDS:-60}
@@ -70,6 +95,15 @@ services:
       - DIARIZE_NUM_REPLICAS=${DIARIZE_NUM_REPLICAS:-}
       # GPU concurrency for simple mode queue
       - GPU_CONCURRENCY=${GPU_CONCURRENCY:-1}
+      # Ray mode: requests each stage replica accepts at once
+      - STAGE_MAX_ONGOING_REQUESTS=${STAGE_MAX_ONGOING_REQUESTS:-2}
+      - PIPELINE_MAX_ONGOING_REQUESTS=${PIPELINE_MAX_ONGOING_REQUESTS:-5}
+      # Ray mode: object store size, session/log dir, spill dir, log rotation
+      - RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-4000000000}
+      - RAY_TMPDIR=${RAY_TMPDIR:-/ray-tmp}
+      - RAY_SPILL_DIR=${RAY_SPILL_DIR:-/.cache/ray-spill}
+      - RAY_ROTATION_MAX_BYTES=${RAY_ROTATION_MAX_BYTES:-52428800}
+      - RAY_ROTATION_BACKUP_COUNT=${RAY_ROTATION_BACKUP_COUNT:-1}
       # Diarization hyperparameter tuning (optional; unset = community-1 defaults)
       - DIARIZE_CLUSTERING_THRESHOLD=${DIARIZE_CLUSTERING_THRESHOLD:-}
       - DIARIZE_MIN_DURATION_OFF=${DIARIZE_MIN_DURATION_OFF:-}
@@ -96,7 +130,8 @@ services:
       - whisperx-cache:/.cache
 
     healthcheck:
-      test: ["CMD", "python3", "-c", "import requests; requests.get('http://localhost:9000/health')"]
+      # Fails on any answer other than 200, including 503 "degraded".
+      test: ["CMD", "python3", "-c", "import sys, requests; r = requests.get('http://localhost:9000/health', timeout=8); sys.exit(r.status_code != 200)"]
       interval: 30s
       timeout: 10s
       retries: 3
