@@ -20,7 +20,9 @@ Two strategies are available (selected via PIPELINE_STRATEGY env var):
 
 import os
 import asyncio
+import functools
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Union
 
 import torch
@@ -103,12 +105,29 @@ class _StageWorker:
         self._name = name
         self._lock = asyncio.Lock()
         self._busy = 0
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        # One long-lived thread per replica. torch's CPU thread count is a
+        # per-thread setting; the worker starts with the count of the
+        # replica's event-loop thread, where stage work ran before, so CPU
+        # stages keep their speed.
+        if self._executor is None:
+            threads = torch.get_num_threads()
+            logger.info(f"{self._name} stage: worker thread with {threads} torch threads")
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"{self._name}-stage",
+                initializer=torch.set_num_threads, initargs=(threads,),
+            )
+        return self._executor
 
     async def _run_blocking(self, fn, *args, **kwargs):
         async with self._lock:
             self._busy += 1
             try:
-                return await asyncio.to_thread(fn, *args, **kwargs)
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(
+                    self._get_executor(), functools.partial(fn, *args, **kwargs))
             finally:
                 self._busy -= 1
 
