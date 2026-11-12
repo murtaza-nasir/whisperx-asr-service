@@ -12,15 +12,16 @@ Start with:
 
 import os
 import time
+import asyncio
 import logging
-import tempfile
 import warnings
 from typing import Optional, List
-from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-import whisperx
+import ray
+import ray.exceptions
+import ray.serve.exceptions
 from ray import serve
 
 from app.version import __version__
@@ -35,9 +36,23 @@ from app.pipeline import (
     resolve_model_name,
     list_available_models,
     describe_model_settings,
+    DiarizationError,
+    _env_int,
     _whisper_models as loaded_models,
 )
 from app import metrics as prom_metrics
+import app.health as health_mod
+from app.admission import get_controller, AdmissionRejected, AudioTooLong
+from app.audio_io import JOB_DIR, UploadTooLarge
+from app.request_flow import (
+    admitted_job,
+    busy_response,
+    unavailable_response,
+    too_large_response,
+    diarization_fields,
+    MaxUploadSizeMiddleware,
+    startup_sweep,
+)
 from app.schemas import (
     ResponseFormat,
     TranscriptionWord,
@@ -48,6 +63,8 @@ from app.schemas import (
 )
 from app.serve_deployments import (
     PIPELINE_STRATEGY,
+    STAGE_MAX_ONGOING_REQUESTS,
+    PIPELINE_MAX_ONGOING_REQUESTS,
     FullPipelineDeployment,
     WhisperDeployment,
     AlignDeployment,
@@ -62,7 +79,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
+MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
+
+def _error_types(module, names):
+    return [t for t in (getattr(module, n, None) for n in names) if isinstance(t, type)]
+
+
+# Ray errors that mean "the service cannot take this request right now"
+# (object store or disk full, a replica died or is restarting). They are
+# answered with 503 and Retry-After so clients back off and try again.
+_UNAVAILABLE_ERRORS = tuple(
+    _error_types(ray.exceptions, (
+        "ObjectStoreFullError", "OutOfDiskError", "RayActorError", "ActorDiedError",
+        "ActorUnavailableError", "ObjectLostError", "OutOfMemoryError",
+    ))
+    + _error_types(ray.serve.exceptions, (
+        "BackPressureError", "DeploymentUnavailableError", "ReplicaUnavailableError",
+    ))
+)
+
+# Shared memory holds only the Ray object store; the session dir and logs
+# live in RAY_TMPDIR. Both are checked by /health.
+SHM_PATH = os.getenv("RAY_PLASMA_DIR") or "/dev/shm"
+RAY_TMPDIR = os.getenv("RAY_TMPDIR") or ""
 
 # Model names are resolved by app.pipeline.resolve_model_name, shared with
 # the simple-mode endpoints.
@@ -98,6 +137,7 @@ fastapi_app = FastAPI(
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
 )
+fastapi_app.add_middleware(MaxUploadSizeMiddleware, max_file_size_mb=MAX_FILE_SIZE_MB)
 
 
 @serve.deployment(
@@ -123,6 +163,58 @@ class ASRIngress:
             "compute_type": COMPUTE_TYPE,
             "serve_mode": "ray",
         })
+        self._admission = get_controller()
+        prom_metrics.bind_admission(self._admission)
+        if pipeline_handle is not None:
+            self._stages = {"pipeline": (pipeline_handle, PIPELINE_MAX_ONGOING_REQUESTS)}
+        else:
+            self._stages = {
+                "whisper": (whisper_handle, STAGE_MAX_ONGOING_REQUESTS),
+                "align": (align_handle, STAGE_MAX_ONGOING_REQUESTS),
+                "diarize": (diarize_handle, STAGE_MAX_ONGOING_REQUESTS),
+            }
+        # Calls this ingress has sent to each stage and not yet received.
+        self._stage_calls = {name: 0 for name in self._stages}
+        self._health_cache = None
+        self._stage_models: List[str] = []
+        os.makedirs(JOB_DIR, exist_ok=True)
+        startup_sweep()
+        try:
+            if len([n for n in ray.nodes() if n.get("Alive")]) > 1:
+                logger.warning(
+                    "The Ray cluster has more than one node. Stages read the decoded "
+                    f"audio from JOB_DIR ({JOB_DIR}), so it must be a path shared by every node."
+                )
+        except Exception:
+            pass
+
+    async def _call(self, stage: str, method, *args, **kwargs):
+        """Call a stage and count it while in flight (for the health ping)."""
+        self._stage_calls[stage] += 1
+        try:
+            return await method.remote(*args, **kwargs)
+        finally:
+            self._stage_calls[stage] -= 1
+
+    async def _ping_stages(self) -> dict:
+        timeout = health_mod.HEALTH_STAGE_TIMEOUT_SECONDS
+
+        async def one(name, handle, slots):
+            # A stage whose request slots are all taken by this ingress is
+            # working; a ping would wait behind those calls, so skip it.
+            if self._stage_calls.get(name, 0) >= slots:
+                return name, {"ok": True, "busy": True, "pinged": False}
+            try:
+                info = await asyncio.wait_for(handle.ping.remote(), timeout=timeout)
+                return name, {"ok": True, "busy": bool(info.get("busy")), "pinged": True,
+                              "loaded_models": info.get("loaded_models", [])}
+            except asyncio.TimeoutError:
+                return name, {"ok": False, "error": f"no answer within {timeout:g}s"}
+            except Exception as e:
+                return name, {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+
+        results = await asyncio.gather(*(one(n, h, s) for n, (h, s) in self._stages.items()))
+        return dict(results)
 
     # ------------------------------------------------------------------
     # Basic endpoints
@@ -139,12 +231,38 @@ class ASRIngress:
 
     @fastapi_app.get("/health")
     async def health_check(self):
-        return {
-            "status": "healthy",
-            "device": DEVICE,
-            "loaded_models": list(loaded_models.keys()),
-            "serve_mode": "ray",
-        }
+        """200 when the service can take work; 503 with reasons when shared
+        memory or disk is low or a stage does not answer. Results are reused
+        for 2 seconds so frequent probes stay cheap."""
+        now = time.monotonic()
+        if self._health_cache and now - self._health_cache[0] < 2.0:
+            code, body = self._health_cache[1]
+        else:
+            shm = [SHM_PATH] + ([RAY_TMPDIR] if RAY_TMPDIR else [])
+            reasons, resources = health_mod.check_resources(shm_paths=shm, disk_paths=[JOB_DIR])
+            stages = await self._ping_stages()
+            code, status, reasons = health_mod.evaluate(reasons, stages)
+            models = sorted({m for s in stages.values() for m in s.get("loaded_models", [])})
+            if models or any(s.get("pinged") for s in stages.values()):
+                self._stage_models = models
+            body = {
+                "status": status,
+                "device": DEVICE,
+                "loaded_models": self._stage_models,
+                "serve_mode": "ray",
+                "pipeline_strategy": PIPELINE_STRATEGY,
+                "reasons": reasons,
+                "stages": stages,
+                "resources": resources,
+                "admission": {**self._admission.snapshot(),
+                              "saturated": self._admission.saturated(),
+                              "limits": self._admission.settings()},
+            }
+            self._health_cache = (now, (code, body))
+        body = dict(body, admission={**self._admission.snapshot(),
+                                     "saturated": self._admission.saturated(),
+                                     "limits": self._admission.settings()})
+        return JSONResponse(status_code=code, content=body)
 
     @fastapi_app.get("/metrics")
     async def metrics(self):
@@ -166,7 +284,8 @@ class ASRIngress:
         return {
             "serve_mode": "ray",
             "device": DEVICE,
-            "loaded_models": list(loaded_models.keys()),
+            "loaded_models": self._stage_models,
+            "queue": self._admission.snapshot(),
         }
 
     # ------------------------------------------------------------------
@@ -191,7 +310,6 @@ class ASRIngress:
         enable_diarization: Optional[bool] = Query(None),
         return_speaker_embeddings: Optional[bool] = Query(None),
     ):
-        temp_audio_path = None
         request_started = time.time()
         metric_status = "error"
         prom_metrics.ACTIVE_TRANSCRIPTIONS.inc()
@@ -215,75 +333,92 @@ class ASRIngress:
             if return_speaker_embeddings is None:
                 return_speaker_embeddings = False
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio_file.filename).suffix) as temp_file:
-                temp_audio_path = temp_file.name
-                content = await audio_file.read()
-                temp_file.write(content)
+            async with admitted_job(audio_file, self._admission, MAX_FILE_SIZE_MB) as job:
+                prom_metrics.AUDIO_SIZE_MB.observe(job.size_mb)
+                prom_metrics.AUDIO_DURATION.observe(job.duration)
+                logger.info(
+                    f"Processing {audio_file.filename} ({job.size_mb:.1f}MB, "
+                    f"{job.duration:.0f}s), model: {model}"
+                )
+                audio = job.pcm_path
 
-            file_size_mb = len(content) / (1024 * 1024)
-            prom_metrics.AUDIO_SIZE_MB.observe(file_size_mb)
-            if file_size_mb > MAX_FILE_SIZE_MB:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large ({file_size_mb:.1f}MB). Maximum allowed: {MAX_FILE_SIZE_MB}MB.",
-                )
-
-            logger.info(f"Processing {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}")
-            audio = whisperx.load_audio(temp_audio_path)
-            prom_metrics.AUDIO_DURATION.observe(len(audio) / 16000.0)
-
-            if self._pipeline:
-                result, speaker_embeddings = await self._pipeline.run.remote(
-                    audio, model_name=model, language=language,
-                    task=task, initial_prompt=initial_prompt,
-                    hotwords=hotwords,
-                    word_timestamps=word_timestamps,
-                    should_diarize=should_diarize,
-                    num_speakers=num_speakers, min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                    return_speaker_embeddings=return_speaker_embeddings,
-                )
-            else:
-                result = await self._whisper.transcribe.remote(
-                    audio, model_name=model, language=language,
-                    task=task, initial_prompt=initial_prompt,
-                    hotwords=hotwords,
-                )
-                # qwen3 and text-only external segments are coarse chunks
-                # until aligned, so speaker assignment needs word timestamps
-                # even if the caller did not request them.
-                internally_aligned = (
-                    result.get("_asr_backend") == "qwen3"
-                    or result.get("_qwen_align")
-                )
-                if word_timestamps or (should_diarize and internally_aligned):
-                    result = await self._align.align.remote(audio, result)
-                speaker_embeddings = None
-                if should_diarize:
-                    result, speaker_embeddings = await self._diarize.diarize.remote(
-                        audio, result,
+                if self._pipeline:
+                    result, speaker_embeddings = await self._call(
+                        "pipeline", self._pipeline.run,
+                        audio, model_name=model, language=language,
+                        task=task, initial_prompt=initial_prompt,
+                        hotwords=hotwords,
+                        word_timestamps=word_timestamps,
+                        should_diarize=should_diarize,
                         num_speakers=num_speakers, min_speakers=min_speakers,
                         max_speakers=max_speakers,
                         return_speaker_embeddings=return_speaker_embeddings,
                     )
-                if not word_timestamps and internally_aligned:
-                    result.pop("word_segments", None)
-                    for seg in result.get("segments", []):
-                        seg.pop("words", None)
-                result.pop("_asr_backend", None)
-                result.pop("_language_name", None)
-                result.pop("_qwen_align", None)
+                else:
+                    result = await self._call(
+                        "whisper", self._whisper.transcribe,
+                        audio, model_name=model, language=language,
+                        task=task, initial_prompt=initial_prompt,
+                        hotwords=hotwords,
+                    )
+                    # qwen3 and text-only external segments are coarse chunks
+                    # until aligned, so speaker assignment needs word timestamps
+                    # even if the caller did not request them.
+                    internally_aligned = (
+                        result.get("_asr_backend") == "qwen3"
+                        or result.get("_qwen_align")
+                    )
+                    if word_timestamps or (should_diarize and internally_aligned):
+                        result = await self._call("align", self._align.align, audio, result)
+                    speaker_embeddings = None
+                    if should_diarize:
+                        result, speaker_embeddings = await self._call(
+                            "diarize", self._diarize.diarize,
+                            audio, result,
+                            num_speakers=num_speakers, min_speakers=min_speakers,
+                            max_speakers=max_speakers,
+                            return_speaker_embeddings=return_speaker_embeddings,
+                        )
+                    if not word_timestamps and internally_aligned:
+                        result.pop("word_segments", None)
+                        for seg in result.get("segments", []):
+                            seg.pop("words", None)
+                    result.pop("_asr_backend", None)
+                    result.pop("_language_name", None)
+                    result.pop("_qwen_align", None)
 
             detected_language = result.get("language", language or "en")
+            diarization, diarization_header = diarization_fields(result)
             metric_status = "ok"
-            return self._format_asr_response(
+            response = self._format_asr_response(
                 result, detected_language, output_format,
-                return_speaker_embeddings, speaker_embeddings,
+                return_speaker_embeddings, speaker_embeddings, diarization,
             )
+            if diarization_header:
+                response.headers["X-Diarization-Status"] = diarization_header
+            return response
 
         except HTTPException as e:
             metric_status = f"http_{e.status_code}"
             raise
+        except UploadTooLarge as e:
+            metric_status = "http_413"
+            return too_large_response(e)
+        except AudioTooLong as e:
+            metric_status = "http_413"
+            prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+            return too_large_response(e, code="audio_too_long")
+        except AdmissionRejected as e:
+            metric_status = "http_503"
+            prom_metrics.ADMISSION_REJECTIONS.labels(reason=e.reason).inc()
+            return busy_response(e)
+        except _UNAVAILABLE_ERRORS as e:
+            metric_status = "http_503"
+            logger.error(f"Transcription unavailable: {type(e).__name__}: {e}")
+            return unavailable_response(f"{type(e).__name__}: {e}")
+        except DiarizationError as e:
+            logger.error(f"Transcription error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
         except Exception as e:
             logger.error(f"Transcription error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -291,12 +426,6 @@ class ASRIngress:
             prom_metrics.ACTIVE_TRANSCRIPTIONS.dec()
             prom_metrics.REQUEST_DURATION.labels(endpoint="/asr").observe(time.time() - request_started)
             prom_metrics.REQUESTS_TOTAL.labels(endpoint="/asr", status=metric_status).inc()
-            prom_metrics.refresh_vram()
-            if temp_audio_path and os.path.exists(temp_audio_path):
-                try:
-                    os.unlink(temp_audio_path)
-                except Exception:
-                    pass
 
     # ------------------------------------------------------------------
     # OpenAI-compat: /v1/audio/transcriptions
@@ -377,7 +506,6 @@ class ASRIngress:
         self, file, model, language, prompt, response_format,
         temperature, timestamp_granularities, task, hotwords=None,
     ):
-        temp_audio_path = None
         try:
             try:
                 whisperx_model = resolve_model_name(model)
@@ -395,45 +523,35 @@ class ASRIngress:
                 return create_openai_error(400, "temperature must be between 0 and 1",
                                            param="temperature")
 
-            suffix = Path(file.filename).suffix if file.filename else ".wav"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                temp_audio_path = temp_file.name
-                content = await file.read()
-                temp_file.write(content)
-
-            file_size_mb = len(content) / (1024 * 1024)
-            if file_size_mb > MAX_FILE_SIZE_MB:
-                return create_openai_error(
-                    413, f"File too large ({file_size_mb:.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
-                    code="file_too_large",
-                )
-
             effective_hotwords = hotwords or prompt
-
-            logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
-
-            audio = whisperx.load_audio(temp_audio_path)
-            duration = len(audio) / 16000
-
             need_word_timestamps = (
                 response_format == ResponseFormat.VERBOSE_JSON
                 and "word" in timestamp_granularities
             )
 
-            if self._pipeline:
-                result, _ = await self._pipeline.run.remote(
-                    audio, model_name=whisperx_model, language=language, task=task,
-                    hotwords=effective_hotwords,
-                    word_timestamps=need_word_timestamps,
-                    should_diarize=False,
+            async with admitted_job(file, self._admission, MAX_FILE_SIZE_MB) as job:
+                duration = job.duration
+                logger.info(
+                    f"OpenAI-compat: Processing {file.filename} ({job.size_mb:.1f}MB, "
+                    f"{duration:.0f}s), model: {whisperx_model}, task: {task}"
                 )
-            else:
-                result = await self._whisper.transcribe.remote(
-                    audio, model_name=whisperx_model, language=language, task=task,
-                    hotwords=effective_hotwords,
-                )
-                if need_word_timestamps:
-                    result = await self._align.align.remote(audio, result)
+                audio = job.pcm_path
+                if self._pipeline:
+                    result, _ = await self._call(
+                        "pipeline", self._pipeline.run,
+                        audio, model_name=whisperx_model, language=language, task=task,
+                        hotwords=effective_hotwords,
+                        word_timestamps=need_word_timestamps,
+                        should_diarize=False,
+                    )
+                else:
+                    result = await self._call(
+                        "whisper", self._whisper.transcribe,
+                        audio, model_name=whisperx_model, language=language, task=task,
+                        hotwords=effective_hotwords,
+                    )
+                    if need_word_timestamps:
+                        result = await self._call("align", self._align.align, audio, result)
 
             detected_language = result.get("language", language or "en")
 
@@ -515,23 +633,29 @@ class ASRIngress:
 
         except HTTPException as e:
             return create_openai_error(e.status_code, e.detail)
+        except UploadTooLarge as e:
+            return too_large_response(e, openai=True)
+        except AudioTooLong as e:
+            prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+            return too_large_response(e, openai=True, code="audio_too_long")
+        except AdmissionRejected as e:
+            prom_metrics.ADMISSION_REJECTIONS.labels(reason=e.reason).inc()
+            return busy_response(e, openai=True)
+        except _UNAVAILABLE_ERRORS as e:
+            logger.error(f"OpenAI-compat unavailable: {type(e).__name__}: {e}")
+            return unavailable_response(f"{type(e).__name__}: {e}", openai=True)
         except Exception as e:
             logger.error(f"OpenAI-compat error: {e}", exc_info=True)
             return create_openai_error(500, f"Internal server error: {e}",
                                        error_type="server_error")
-        finally:
-            if temp_audio_path and os.path.exists(temp_audio_path):
-                try:
-                    os.unlink(temp_audio_path)
-                except Exception:
-                    pass
 
     # ------------------------------------------------------------------
     # /asr response formatting
     # ------------------------------------------------------------------
     @staticmethod
     def _format_asr_response(result, detected_language, output_format,
-                             return_speaker_embeddings, speaker_embeddings):
+                             return_speaker_embeddings, speaker_embeddings,
+                             diarization=None):
         if output_format == "json":
             response_data = {
                 "text": result.get("segments", []),
@@ -541,11 +665,13 @@ class ASRIngress:
             }
             if return_speaker_embeddings and speaker_embeddings:
                 response_data["speaker_embeddings"] = sanitize_float_values(speaker_embeddings)
+            if diarization:
+                response_data["diarization"] = diarization
             return JSONResponse(content=response_data)
 
         elif output_format == "text":
             text = " ".join([seg.get("text", "") for seg in result.get("segments", [])])
-            return {"text": text}
+            return JSONResponse(content={"text": text})
 
         elif output_format == "srt":
             srt_content = []
@@ -557,7 +683,7 @@ class ASRIngress:
                 if speaker:
                     text = f"[{speaker}] {text}"
                 srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
-            return {"srt": "\n".join(srt_content)}
+            return JSONResponse(content={"srt": "\n".join(srt_content)})
 
         elif output_format == "vtt":
             vtt_content = ["WEBVTT\n"]
@@ -569,7 +695,7 @@ class ASRIngress:
                 if speaker:
                     text = f"[{speaker}] {text}"
                 vtt_content.append(f"{start_time} --> {end_time}\n{text}\n")
-            return {"vtt": "\n".join(vtt_content)}
+            return JSONResponse(content={"vtt": "\n".join(vtt_content)})
 
         elif output_format == "tsv":
             tsv_content = ["start\tend\ttext\tspeaker"]
@@ -579,7 +705,7 @@ class ASRIngress:
                 text = segment.get("text", "").strip()
                 speaker = segment.get("speaker", "")
                 tsv_content.append(f"{start}\t{end}\t{text}\t{speaker}")
-            return {"tsv": "\n".join(tsv_content)}
+            return JSONResponse(content={"tsv": "\n".join(tsv_content)})
 
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported output format: {output_format}")

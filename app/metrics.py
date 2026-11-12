@@ -49,6 +49,30 @@ VRAM_ALLOCATED_BYTES = Gauge(
     "Currently allocated VRAM (CUDA only; 0 on CPU)",
 )
 SERVICE_INFO = Info("whisperx_service", "Static service identity")
+INFLIGHT_AUDIO_SECONDS = Gauge(
+    "whisperx_inflight_audio_seconds",
+    "Audio seconds admitted to the pipeline and not yet finished",
+)
+QUEUED_REQUESTS = Gauge(
+    "whisperx_queued_requests",
+    "Requests waiting for admission",
+)
+QUEUED_AUDIO_SECONDS = Gauge(
+    "whisperx_queued_audio_seconds",
+    "Audio seconds waiting for admission",
+)
+ADMISSION_REJECTIONS = Counter(
+    "whisperx_admission_rejections_total",
+    "Requests refused by admission control (busy or too long)",
+    ["reason"],
+)
+
+
+def bind_admission(controller):
+    """Report an AdmissionController's live state through the gauges."""
+    INFLIGHT_AUDIO_SECONDS.set_function(lambda: controller.inflight_seconds)
+    QUEUED_REQUESTS.set_function(lambda: controller.queued_requests)
+    QUEUED_AUDIO_SECONDS.set_function(lambda: controller.queued_seconds)
 
 
 def refresh_vram():

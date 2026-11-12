@@ -194,6 +194,25 @@ RESEGMENT_BY_SPEAKER = (
     in ("1", "true", "yes", "on")
 )
 
+# What a failed diarization does to the response. "flag" (default) returns
+# the transcript without speakers and marks it with a "diarization" status;
+# "fail" makes the request fail with an error.
+DIARIZE_ON_ERROR = (_env_or_none("DIARIZE_ON_ERROR") or "flag").lower()
+if DIARIZE_ON_ERROR not in ("flag", "fail"):
+    logger.warning(f"DIARIZE_ON_ERROR={DIARIZE_ON_ERROR!r} is not flag or fail; using flag")
+    DIARIZE_ON_ERROR = "flag"
+
+
+class DiarizationError(RuntimeError):
+    """Diarization failed and DIARIZE_ON_ERROR=fail."""
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    oom_type = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+    if isinstance(oom_type, type) and isinstance(exc, oom_type):
+        return True
+    return "out of memory" in str(exc).lower()
+
 
 def get_canonical_models() -> list:
     """
@@ -888,69 +907,92 @@ def diarize(
     """
     Run pyannote speaker diarization and assign speakers to segments.
 
-    Returns (result_with_speakers, speaker_embeddings_or_None).
+    Returns (result_with_speakers, speaker_embeddings_or_None). The result
+    carries "_diarization": {"status": "ok" | "failed" | "unavailable", ...};
+    the endpoints turn it into the response's "diarization" field. A CUDA
+    out-of-memory error is retried once after freeing the cache.
     """
     global _diarize_last_used
 
     if not HF_TOKEN:
         logger.warning("Speaker diarization requested but HF_TOKEN not set")
+        result["_diarization"] = {"status": "unavailable", "error": "HF_TOKEN is not set"}
         return result, None
 
     logger.info("Starting speaker diarization...")
+    diarize_params: Dict[str, Any] = {}
+    if num_speakers is not None:
+        diarize_params["num_speakers"] = num_speakers
+        logger.info(f"Diarization with exact speaker count: {num_speakers}")
+    else:
+        if min_speakers is not None:
+            diarize_params["min_speakers"] = min_speakers
+        if max_speakers is not None:
+            diarize_params["max_speakers"] = max_speakers
+        logger.info(f"Diarization with speaker range: {min_speakers}-{max_speakers}")
+    if return_speaker_embeddings:
+        diarize_params["return_embeddings"] = True
+        logger.info("Speaker embeddings will be returned")
+
+    last_error: Optional[BaseException] = None
+    for attempt in (1, 2):
+        try:
+            result, speaker_embeddings = _diarize_once(audio, result, diarize_params,
+                                                       return_speaker_embeddings)
+            with _model_load_lock:
+                _diarize_last_used = time.time()
+            logger.info("Speaker diarization complete")
+            clear_gpu_memory()
+            result["_diarization"] = {"status": "ok"}
+            return result, speaker_embeddings
+        except Exception as e:
+            last_error = e
+            clear_gpu_memory()
+            if attempt == 1 and _is_out_of_memory(e):
+                logger.warning(f"Speaker diarization ran out of memory; retrying once: {e}")
+                continue
+            break
+
+    logger.error(f"Speaker diarization failed: {last_error}")
+    if DIARIZE_ON_ERROR == "fail":
+        raise DiarizationError(f"Speaker diarization failed: {last_error}") from last_error
+    result["_diarization"] = {"status": "failed", "error": str(last_error)}
+    return result, None
+
+
+def _diarize_once(audio, result, diarize_params, return_speaker_embeddings):
     speaker_embeddings = None
-    try:
-        diarize_model = load_diarize_pipeline()
+    diarize_model = load_diarize_pipeline()
+    diarize_output = diarize_model(audio, **diarize_params)
 
-        diarize_params: Dict[str, Any] = {}
-        if num_speakers is not None:
-            diarize_params["num_speakers"] = num_speakers
-            logger.info(f"Diarization with exact speaker count: {num_speakers}")
-        else:
-            if min_speakers is not None:
-                diarize_params["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                diarize_params["max_speakers"] = max_speakers
-            logger.info(f"Diarization with speaker range: {min_speakers}-{max_speakers}")
+    if return_speaker_embeddings and isinstance(diarize_output, tuple):
+        diarize_segments, speaker_embeddings = diarize_output
+        logger.info(f"Received speaker embeddings for {len(speaker_embeddings)} speakers")
+    else:
+        diarize_segments = diarize_output
 
-        if return_speaker_embeddings:
-            diarize_params["return_embeddings"] = True
-            logger.info("Speaker embeddings will be returned")
+    if hasattr(diarize_segments, "exclusive_speaker_diarization"):
+        diarize_segments = diarize_segments.exclusive_speaker_diarization
+        logger.info("Using exclusive speaker diarization for better timestamp reconciliation")
 
-        diarize_output = diarize_model(audio, **diarize_params)
+    # assign_word_speakers modifies the transcript in place; work on a copy
+    # so a failed attempt leaves the original intact for the retry.
+    result = whisperx.assign_word_speakers(
+        diarize_segments, copy.deepcopy(result), fill_nearest=DIARIZE_FILL_NEAREST
+    )
+    # qwen3 and text-only external segments are built from silence gaps
+    # or chunk spans alone, so a segment can span several speakers'
+    # turns. Now that words carry speaker labels, rebuild the segments
+    # so each one holds a single speaker's turn. Opt-in for the whisper
+    # backend via RESEGMENT_BY_SPEAKER.
+    if (
+        result.get("_asr_backend") == "qwen3"
+        or result.get("_qwen_align")
+        or RESEGMENT_BY_SPEAKER
+    ):
+        from app import qwen3_backend
 
-        if return_speaker_embeddings and isinstance(diarize_output, tuple):
-            diarize_segments, speaker_embeddings = diarize_output
-            logger.info(f"Received speaker embeddings for {len(speaker_embeddings)} speakers")
-        else:
-            diarize_segments = diarize_output
-
-        if hasattr(diarize_segments, "exclusive_speaker_diarization"):
-            diarize_segments = diarize_segments.exclusive_speaker_diarization
-            logger.info("Using exclusive speaker diarization for better timestamp reconciliation")
-
-        result = whisperx.assign_word_speakers(
-            diarize_segments, result, fill_nearest=DIARIZE_FILL_NEAREST
-        )
-        # qwen3 and text-only external segments are built from silence gaps
-        # or chunk spans alone, so a segment can span several speakers'
-        # turns. Now that words carry speaker labels, rebuild the segments
-        # so each one holds a single speaker's turn. Opt-in for the whisper
-        # backend via RESEGMENT_BY_SPEAKER.
-        if (
-            result.get("_asr_backend") == "qwen3"
-            or result.get("_qwen_align")
-            or RESEGMENT_BY_SPEAKER
-        ):
-            from app import qwen3_backend
-
-            result = qwen3_backend.resegment_by_speaker(result)
-        with _model_load_lock:
-            _diarize_last_used = time.time()
-        logger.info("Speaker diarization complete")
-        clear_gpu_memory()
-    except Exception as e:
-        logger.warning(f"Speaker diarization failed: {e}, continuing without diarization")
-
+        result = qwen3_backend.resegment_by_speaker(result)
     return result, speaker_embeddings
 
 

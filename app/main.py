@@ -5,16 +5,13 @@ Compatible with openai-whisper-asr-webservice API endpoints
 
 import os
 import time
-import tempfile
 import logging
 import warnings
 from contextlib import asynccontextmanager
 from typing import Optional
-from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.responses import JSONResponse, Response
-import whisperx
 
 from app.version import __version__
 from app.pipeline import (
@@ -33,10 +30,22 @@ from app.pipeline import (
     resolve_model_name,
     preload_whisper_model,
     describe_model_settings,
+    DiarizationError,
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue, get_queue_metrics
 from app import metrics as prom_metrics
+import app.health as health_mod
+from app.admission import get_controller, AdmissionRejected, AudioTooLong
+from app.audio_io import JOB_DIR, UploadTooLarge, load_pcm
+from app.request_flow import (
+    admitted_job,
+    busy_response,
+    too_large_response,
+    diarization_fields,
+    MaxUploadSizeMiddleware,
+    startup_sweep,
+)
 
 # Suppress pyannote pooling warnings about degrees of freedom
 warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
@@ -64,6 +73,9 @@ async def lifespan(app: FastAPI):
         "compute_type": COMPUTE_TYPE,
         "serve_mode": SERVE_MODE,
     })
+    prom_metrics.bind_admission(get_controller())
+    os.makedirs(JOB_DIR, exist_ok=True)
+    startup_sweep()
     preload_whisper_model("startup")
     yield
 
@@ -75,6 +87,12 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+app.add_middleware(MaxUploadSizeMiddleware, max_file_size_mb=MAX_FILE_SIZE_MB)
+
+
+def _run_pipeline_on_file(pcm_path, **kwargs):
+    """Worker-thread entry: load the decoded job file, then run the pipeline."""
+    return run_pipeline(load_pcm(pcm_path), **kwargs)
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
@@ -130,7 +148,6 @@ async def transcribe_audio(
         enable_diarization: Alias for diarize (deprecated, use diarize instead)
         return_speaker_embeddings: Return speaker embeddings (256-dimensional vectors)
     """
-    temp_audio_path = None
     request_started = time.time()
     metric_status = "error"
     prom_metrics.ACTIVE_TRANSCRIPTIONS.inc()
@@ -157,49 +174,36 @@ async def transcribe_audio(
         if return_speaker_embeddings is None:
             return_speaker_embeddings = False
 
-        # Save uploaded file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio_file.filename).suffix) as temp_file:
-            temp_audio_path = temp_file.name
-            content = await audio_file.read()
-            temp_file.write(content)
-
-        # Check file size
-        file_size_mb = len(content) / (1024 * 1024)
-        prom_metrics.AUDIO_SIZE_MB.observe(file_size_mb)
-        if file_size_mb > MAX_FILE_SIZE_MB:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large ({file_size_mb:.1f}MB). Maximum allowed: {MAX_FILE_SIZE_MB}MB. "
-                       f"Large files may cause out-of-memory errors."
+        async with admitted_job(audio_file, get_controller(), MAX_FILE_SIZE_MB) as job:
+            prom_metrics.AUDIO_SIZE_MB.observe(job.size_mb)
+            prom_metrics.AUDIO_DURATION.observe(job.duration)
+            if job.size_mb > 100:
+                logger.warning(f"Processing large file ({job.size_mb:.1f}MB) - may consume significant VRAM")
+            logger.info(
+                f"Processing audio file: {audio_file.filename} ({job.size_mb:.1f}MB, "
+                f"{job.duration:.0f}s), model: {model}, language: {language}"
             )
 
-        if file_size_mb > 100:
-            logger.warning(f"Processing large file ({file_size_mb:.1f}MB) - may consume significant VRAM")
-
-        logger.info(f"Processing audio file: {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}, language: {language}")
-
-        # Load audio
-        audio = whisperx.load_audio(temp_audio_path)
-        prom_metrics.AUDIO_DURATION.observe(len(audio) / 16000.0)
-
-        # Run pipeline through the async queue (GPU semaphore)
-        result, speaker_embeddings = await run_in_queue(
-            run_pipeline,
-            audio,
-            model_name=model,
-            language=language,
-            task=task,
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-            word_timestamps=word_timestamps,
-            should_diarize=should_diarize,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            return_speaker_embeddings=return_speaker_embeddings,
-        )
+            # Run pipeline through the async queue (GPU semaphore)
+            result, speaker_embeddings = await run_in_queue(
+                _run_pipeline_on_file,
+                job.pcm_path,
+                model_name=model,
+                language=language,
+                task=task,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                word_timestamps=word_timestamps,
+                should_diarize=should_diarize,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                return_speaker_embeddings=return_speaker_embeddings,
+            )
 
         detected_language = result.get("language", language or "en")
+        diarization, diarization_header = diarization_fields(result)
+        headers = {"X-Diarization-Status": diarization_header} if diarization_header else None
 
         # Format output based on requested format
         if output_format == "json":
@@ -213,14 +217,16 @@ async def transcribe_audio(
             if return_speaker_embeddings and speaker_embeddings:
                 response_data["speaker_embeddings"] = sanitize_float_values(speaker_embeddings)
                 logger.info(f"Including speaker embeddings in response: {list(speaker_embeddings.keys())}")
+            if diarization:
+                response_data["diarization"] = diarization
 
             metric_status = "ok"
-            return JSONResponse(content=response_data)
+            return JSONResponse(content=response_data, headers=headers)
 
         elif output_format == "text":
             text = " ".join([seg.get("text", "") for seg in result.get("segments", [])])
             metric_status = "ok"
-            return {"text": text}
+            return JSONResponse(content={"text": text}, headers=headers)
 
         elif output_format == "srt":
             srt_content = []
@@ -236,7 +242,7 @@ async def transcribe_audio(
                 srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
 
             metric_status = "ok"
-            return {"srt": "\n".join(srt_content)}
+            return JSONResponse(content={"srt": "\n".join(srt_content)}, headers=headers)
 
         elif output_format == "vtt":
             vtt_content = ["WEBVTT\n"]
@@ -252,7 +258,7 @@ async def transcribe_audio(
                 vtt_content.append(f"{start_time} --> {end_time}\n{text}\n")
 
             metric_status = "ok"
-            return {"vtt": "\n".join(vtt_content)}
+            return JSONResponse(content={"vtt": "\n".join(vtt_content)}, headers=headers)
 
         elif output_format == "tsv":
             tsv_content = ["start\tend\ttext\tspeaker"]
@@ -264,7 +270,7 @@ async def transcribe_audio(
                 tsv_content.append(f"{start}\t{end}\t{text}\t{speaker}")
 
             metric_status = "ok"
-            return {"tsv": "\n".join(tsv_content)}
+            return JSONResponse(content={"tsv": "\n".join(tsv_content)}, headers=headers)
 
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported output format: {output_format}")
@@ -272,6 +278,20 @@ async def transcribe_audio(
     except HTTPException as e:
         metric_status = f"http_{e.status_code}"
         raise
+    except UploadTooLarge as e:
+        metric_status = "http_413"
+        return too_large_response(e)
+    except AudioTooLong as e:
+        metric_status = "http_413"
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+        return too_large_response(e, code="audio_too_long")
+    except AdmissionRejected as e:
+        metric_status = "http_503"
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason=e.reason).inc()
+        return busy_response(e)
+    except DiarizationError as e:
+        logger.error(f"Transcription error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Transcription error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -281,22 +301,25 @@ async def transcribe_audio(
         prom_metrics.REQUEST_DURATION.labels(endpoint="/asr").observe(time.time() - request_started)
         prom_metrics.REQUESTS_TOTAL.labels(endpoint="/asr", status=metric_status).inc()
         prom_metrics.refresh_vram()
-        if temp_audio_path and os.path.exists(temp_audio_path):
-            try:
-                os.unlink(temp_audio_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete temporary file: {str(e)}")
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for monitoring"""
-    return {
-        "status": "healthy",
+    """200 when the service can take work; 503 with reasons when the job
+    directory's disk is nearly full."""
+    reasons, resources = health_mod.check_resources(disk_paths=[JOB_DIR])
+    code, status, reasons = health_mod.evaluate(reasons)
+    controller = get_controller()
+    return JSONResponse(status_code=code, content={
+        "status": status,
         "device": DEVICE,
         "loaded_models": list(loaded_models.keys()),
         "serve_mode": SERVE_MODE,
-    }
+        "reasons": reasons,
+        "resources": resources,
+        "admission": {**controller.snapshot(), "saturated": controller.saturated(),
+                      "limits": controller.settings()},
+    })
 
 
 @app.get("/metrics")
@@ -318,6 +341,7 @@ async def queue_metrics():
     }
     if SERVE_MODE == "simple":
         data["queue"] = get_queue_metrics()
+    data["admission"] = get_controller().snapshot()
     return data
 
 

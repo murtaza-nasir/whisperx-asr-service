@@ -6,15 +6,12 @@ GET /v1/models
 """
 
 import os
-import tempfile
 import logging
 import time
 from typing import Optional, List, Union
-from pathlib import Path
 
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-import whisperx
 
 from app.schemas import (
     ResponseFormat,
@@ -41,6 +38,10 @@ from app.pipeline import (
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue
+from app import metrics as prom_metrics
+from app.admission import get_controller, AdmissionRejected, AudioTooLong
+from app.audio_io import UploadTooLarge, load_pcm
+from app.request_flow import admitted_job, busy_response, too_large_response
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,10 @@ def _run_transcribe_and_align(
     need_word_timestamps: bool,
     hotwords: Optional[str] = None,
 ):
-    """Blocking helper that runs transcription + optional alignment on GPU."""
+    """Blocking helper that runs transcription + optional alignment on GPU.
+    `audio` is a decoded job file path or an array."""
+    if isinstance(audio, str):
+        audio = load_pcm(audio)
     result = pipeline_transcribe(
         audio,
         model_name=whisperx_model,
@@ -190,8 +194,6 @@ async def process_audio(
     """
     Core audio processing function shared by transcriptions and translations endpoints
     """
-    temp_audio_path = None
-
     try:
         # Validate model: every name /v1/models lists is accepted. The field
         # stays required, as in the OpenAI API; an empty value uses the
@@ -217,43 +219,27 @@ async def process_audio(
                 param="temperature"
             )
 
-        # Save uploaded file to temporary location
-        suffix = Path(file.filename).suffix if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            temp_audio_path = temp_file.name
-            content = await file.read()
-            temp_file.write(content)
-
-        # Check file size
-        file_size_mb = len(content) / (1024 * 1024)
-        if file_size_mb > MAX_FILE_SIZE_MB:
-            return create_openai_error(
-                413,
-                f"File too large ({file_size_mb:.1f}MB). Maximum: {MAX_FILE_SIZE_MB}MB",
-                code="file_too_large"
-            )
-
-        logger.info(f"OpenAI-compat: Processing {file.filename} ({file_size_mb:.1f}MB), model: {whisperx_model}, task: {task}")
-
-        # Load audio
-        audio = whisperx.load_audio(temp_audio_path)
-        duration = len(audio) / 16000  # WhisperX loads at 16kHz
-
         need_word_timestamps = (
             response_format == ResponseFormat.VERBOSE_JSON and
             "word" in timestamp_granularities
         )
 
-        # Run through the async queue
-        result = await run_in_queue(
-            _run_transcribe_and_align,
-            audio,
-            whisperx_model,
-            language,
-            task,
-            need_word_timestamps,
-            hotwords=hotwords or prompt,
-        )
+        async with admitted_job(file, get_controller(), MAX_FILE_SIZE_MB) as job:
+            duration = job.duration
+            logger.info(
+                f"OpenAI-compat: Processing {file.filename} ({job.size_mb:.1f}MB, "
+                f"{duration:.0f}s), model: {whisperx_model}, task: {task}"
+            )
+            # Run through the async queue
+            result = await run_in_queue(
+                _run_transcribe_and_align,
+                job.pcm_path,
+                whisperx_model,
+                language,
+                task,
+                need_word_timestamps,
+                hotwords=hotwords or prompt,
+            )
 
         detected_language = result.get("language", language or "en")
 
@@ -299,6 +285,17 @@ async def process_audio(
     except HTTPException as e:
         return create_openai_error(e.status_code, e.detail)
 
+    except UploadTooLarge as e:
+        return too_large_response(e, openai=True)
+
+    except AudioTooLong as e:
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+        return too_large_response(e, openai=True, code="audio_too_long")
+
+    except AdmissionRejected as e:
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason=e.reason).inc()
+        return busy_response(e, openai=True)
+
     except Exception as e:
         logger.error(f"OpenAI-compat error: {str(e)}", exc_info=True)
         return create_openai_error(
@@ -306,13 +303,6 @@ async def process_audio(
             f"Internal server error: {str(e)}",
             error_type="server_error"
         )
-
-    finally:
-        if temp_audio_path and os.path.exists(temp_audio_path):
-            try:
-                os.unlink(temp_audio_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {e}")
 
 
 @router.post("/transcriptions")

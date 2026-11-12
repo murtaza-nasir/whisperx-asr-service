@@ -21,10 +21,15 @@ def client_for(monkeypatch):
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         _drop_app_modules()
-        import whisperx
-        monkeypatch.setattr(whisperx, "load_audio", lambda path: np.zeros(16000, dtype=np.float32))
         import app.main as main
         import app.openai_compat as oc
+        import app.audio_io as audio_io
+
+        async def fake_decode(src, dst):
+            np.zeros(16000, dtype=np.int16).tofile(dst)
+            return 1.0
+
+        monkeypatch.setattr(audio_io, "decode_to_pcm", fake_decode)
         seen = {}
 
         def fake_pipeline(audio, model_name=None, **kwargs):
