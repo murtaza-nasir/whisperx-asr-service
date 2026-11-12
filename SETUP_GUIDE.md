@@ -180,13 +180,16 @@ INFO:     Uvicorn running on http://0.0.0.0:9000
 # Health check
 curl http://localhost:9000/health
 
-# Expected response:
+# Expected response (shortened):
 {
   "status": "healthy",
   "device": "cuda",
-  "loaded_models": []
+  "loaded_models": [],
+  "reasons": []
 }
 ```
+
+A 503 response with `"status": "degraded"` lists its causes in `reasons` (low shared memory or disk, or a pipeline stage that does not answer).
 
 ### Step 6: Configure Speakr
 
@@ -502,6 +505,29 @@ nvidia-smi -l 1
 3. Use `COMPUTE_TYPE=int8`
 4. Close other GPU applications
 
+### Issue: Long Files Fail or the Service Stops Answering
+
+**Symptoms:** several long recordings (hours each) sent at once end in errors such as "object store is full", or the service stops answering until it is restarted.
+
+**Solutions:**
+1. Limit the audio in progress and the queue in `.env` (all limits are off by default):
+   ```bash
+   # Refuse files longer than 8 hours (413)
+   MAX_AUDIO_SECONDS=28800
+   # At most 6 hours of audio in the pipeline at once; further requests are queued
+   MAX_INFLIGHT_AUDIO_SECONDS=21600
+   # At most 4 waiting requests and 12 hours of waiting audio, each for at
+   # most 30 minutes; beyond that, 503 with Retry-After
+   MAX_QUEUED_REQUESTS=4
+   MAX_QUEUED_AUDIO_SECONDS=43200
+   QUEUE_WAIT_TIMEOUT_SECONDS=1800
+   ```
+2. Point `JOB_DIR` at a volume with free disk space (about 115 MB per hour of audio, plus the upload).
+3. Keep the `restart: unless-stopped` policy. After about three minutes of failed health checks, the container exits and is started again with clean shared memory (`WATCHDOG_*` settings in the README).
+4. In Speakr, keep the number of concurrent ASR jobs low, and let a timed-out long job finish on the server before sending it again.
+
+See "Long Files, Overload and Self-Healing" in the README for every setting.
+
 ### Issue: Speaker Diarization Fails
 
 **Check:**
@@ -510,6 +536,7 @@ nvidia-smi -l 1
 3. Check logs: `docker compose logs | grep -i diarization`
 
 **Solutions:**
+- Look for `"diarization": {"status": "failed", "error": ...}` in the `/asr` JSON response or an `X-Diarization-Status: failed` header; the cause is in the error text
 - Verify token: Visit https://huggingface.co/settings/tokens
 - Accept agreements again
 - Check if pyannote models can download (internet access required on first run)

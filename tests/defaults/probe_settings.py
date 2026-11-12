@@ -48,7 +48,28 @@ if hasattr(p, "preload_whisper_model"):
     returned = p.preload_whisper_model("probe")
     preloaded = {"loaded": calls, "returned": returned}
 
+robustness = "n/a"
+try:
+    from app import admission, audio_io, health
+    from app.watchdog import Watchdog
+
+    dog = Watchdog(["true"])
+    robustness = {
+        "admission": admission.AdmissionController.from_env().settings(),
+        "job_dir": audio_io.JOB_DIR,
+        "job_ttl_seconds": audio_io.JOB_TTL_SECONDS,
+        "health_min_shm_free_pct": health.HEALTH_MIN_SHM_FREE_PCT,
+        "health_min_disk_free_mb": health.HEALTH_MIN_DISK_FREE_MB,
+        "health_stage_timeout_seconds": health.HEALTH_STAGE_TIMEOUT_SECONDS,
+        "watchdog": {"enabled": dog.enabled, "interval": dog.interval, "failures": dog.max_failures,
+                     "shm_max_used": dog.shm_max_used, "shm_failures": dog.shm_max_failures},
+        "diarize_on_error": getattr(p, "DIARIZE_ON_ERROR", None),
+    }
+except ImportError:
+    pass
+
 result.update({
+    "robustness": robustness,
     "default_model": getattr(p, "DEFAULT_MODEL", None),
     "preload_model": getattr(p, "PRELOAD_MODEL", os.getenv("PRELOAD_MODEL")),
     "asr_backend": getattr(p, "ASR_BACKEND", None),

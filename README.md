@@ -553,6 +553,14 @@ PRELOAD_MODEL=large-v3
 # Default 1GB, adjust lower for GPUs with <16GB VRAM
 MAX_FILE_SIZE_MB=1000
 
+# Long files and overload (all 0 = off). See "Long Files, Overload and
+# Self-Healing" below.
+# MAX_AUDIO_SECONDS=0
+# MAX_INFLIGHT_AUDIO_SECONDS=0
+# MAX_QUEUED_AUDIO_SECONDS=0
+# MAX_QUEUED_REQUESTS=0
+# QUEUE_WAIT_TIMEOUT_SECONDS=0
+
 # Idle model eviction (default disabled). When > 0, Whisper models that have
 # not served a request in this many seconds are unloaded from memory by a
 # background sweep. The next request that needs the model will reload it.
@@ -772,6 +780,82 @@ Then start with:
 docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
 ```
 
+### Long Files, Overload and Self-Healing
+
+Each request gets a working directory under `JOB_DIR`. The upload is copied there in 1 MB chunks, and `MAX_FILE_SIZE_MB` is checked during the copy (and from the `Content-Length` header, before the body is read). The file is then decoded once, in a background ffmpeg process, to 16 kHz mono 16-bit PCM. Each pipeline stage reads that file; the samples are identical to `whisperx.load_audio()` on the original upload. In Ray Serve mode, the audio therefore never enters the Ray object store, and the size of `/dev/shm` no longer limits how much audio can be in progress. The directory is removed when the request ends, also after errors and client disconnects. Directories and temp uploads left over from a crash are removed at container start.
+
+#### Admission Control
+
+The audio in progress can be limited by duration. All limits are off by default, so existing setups behave as before.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_AUDIO_SECONDS` | `0` (off) | Longest file accepted. A longer file gets **413** with `"audio too long"` (OpenAI endpoints: code `audio_too_long`). |
+| `MAX_INFLIGHT_AUDIO_SECONDS` | `0` (off) | Total audio seconds in the pipeline at once. Further requests are held in a first-in, first-out queue. A single file longer than this limit is still admitted when nothing else is in progress. |
+| `MAX_QUEUED_REQUESTS` | `0` (no limit) | Requests allowed to wait. |
+| `MAX_QUEUED_AUDIO_SECONDS` | `0` (no limit) | Audio seconds allowed to wait. |
+| `QUEUE_WAIT_TIMEOUT_SECONDS` | `0` (no limit) | Longest wait for admission. |
+
+When the queue is full or the wait times out, the response is **503** with a `Retry-After` header (an estimate from the measured throughput, 30 to 3600 seconds) and a JSON body:
+
+```json
+{"error": "busy", "reason": "queue_full", "retry_after": 240,
+ "queue": {"inflight_requests": 2, "inflight_audio_seconds": 21600.0,
+           "queued_requests": 4, "queued_audio_seconds": 30000.0,
+           "estimated_wait_seconds": 240, "admission_rejections_total": 7}}
+```
+
+Wait for `Retry-After` before sending the file again. After giving up on a long request, do not resend it at once: work already started on the GPU is not interrupted.
+
+The duration used for admission is read with `ffprobe` before decoding, so a rejected file is never decoded. The limits apply per server process (simple mode) or per ingress replica (Ray Serve mode, one replica).
+
+#### Health and Restarts
+
+`GET /health` is **200** (`"status": "healthy"`) when the service can take work and **503** (`"status": "degraded"`, with a `reasons` list) when:
+
+- free space on `/dev/shm` or on `RAY_TMPDIR` is below `HEALTH_MIN_SHM_FREE_PCT` percent (Ray Serve mode),
+- free disk space at `JOB_DIR` is below `HEALTH_MIN_DISK_FREE_MB`,
+- a pipeline stage gives no answer to a ping within `HEALTH_STAGE_TIMEOUT_SECONDS` (Ray Serve mode). A stage whose request slots are all busy is not pinged and counts as working.
+
+A full admission queue is reported under `admission` (`"saturated": true`), but it is not a reason for 503. `GET /` stays a plain liveness check.
+
+The Docker healthcheck fails on any status other than 200. An `unhealthy` container is never restarted by Docker, so the service is run under a small watchdog (`app/watchdog.py`). `/health` is polled every `WATCHDOG_INTERVAL_SECONDS`. After `WATCHDOG_FAILURES` consecutive failed checks, or when `/dev/shm` stays above `WATCHDOG_SHM_MAX_USED_PCT` for `WATCHDOG_SHM_FAILURES` checks, the service is stopped and the container exits with status 1. With `restart: unless-stopped` (as in the Compose files) or `--restart unless-stopped`, a fresh container is then started, with an empty `/dev/shm`. Failed checks count only after the first healthy answer, so a long first start (model downloads) cannot cause a restart. `docker stop` works as before.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JOB_DIR` | `/tmp/whisperx-jobs` | Per-request working files. Point it at a volume with free space for long files (about 115 MB per hour of audio, plus the upload). |
+| `JOB_TTL_SECONDS` | `86400` | Age after which a leftover job directory is removed at startup. |
+| `HEALTH_MIN_SHM_FREE_PCT` | `5` | 0 turns the check off. |
+| `HEALTH_MIN_DISK_FREE_MB` | `500` | 0 turns the check off. |
+| `HEALTH_STAGE_TIMEOUT_SECONDS` | `5` | Ping timeout per stage. |
+| `WATCHDOG_ENABLED` | `true` | `false` keeps only signal forwarding. |
+| `WATCHDOG_INTERVAL_SECONDS` | `30` | Time between checks. |
+| `WATCHDOG_FAILURES` | `6` | Consecutive failed checks before exit (about 3 minutes). |
+| `WATCHDOG_TIMEOUT_SECONDS` | `10` | Timeout of one check. |
+| `WATCHDOG_SHM_MAX_USED_PCT` | `98` | `/dev/shm` use that counts as full. |
+| `WATCHDOG_SHM_FAILURES` | `4` | Consecutive checks with full `/dev/shm` before exit. |
+| `DIARIZE_ON_ERROR` | `flag` | `flag`: after a failed diarization, the transcript is still returned, without speakers, with `"diarization": {"status": "failed", "error": ...}` in the JSON and an `X-Diarization-Status: failed` header. `fail`: the request ends with a 500 error. |
+
+When diarization is requested, the JSON response of `/asr` has a `diarization` field (`"status"` is `ok`, `failed` or `unavailable` when `HF_TOKEN` is not set), and every output format has the `X-Diarization-Status` header. A CUDA out-of-memory error during diarization is retried once after the GPU cache is freed.
+
+#### Ray Serve Memory Layout
+
+In Ray Serve mode, only the Ray object store is in `/dev/shm`. Ray's session files and logs are in `RAY_TMPDIR` (a 2 GB tmpfs at `/ray-tmp` in the Compose files), with log rotation at `RAY_ROTATION_MAX_BYTES` (50 MB) and `RAY_ROTATION_BACKUP_COUNT` (1). Objects spill to `RAY_SPILL_DIR` on disk (`/.cache/ray-spill`, in the cache volume). A full log directory therefore cannot fill shared memory, and spilling frees shared memory.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RAY_OBJECT_STORE_MEMORY` | `4000000000` | Object store size in bytes; keep it well below `shm_size`. |
+| `RAY_TMPDIR` | `/ray-tmp` | Ray session files and logs. Without the tmpfs mount, the directory is on the container's disk. |
+| `RAY_SPILL_DIR` | `/.cache/ray-spill` | Object spilling target. |
+| `RAY_ROTATION_MAX_BYTES` | `52428800` | Size of one Ray log file before rotation. |
+| `RAY_ROTATION_BACKUP_COUNT` | `1` | Rotated copies kept per log file. |
+| `STAGE_MAX_ONGOING_REQUESTS` | `2` | Requests each split-strategy stage replica accepts at once. |
+| `PIPELINE_MAX_ONGOING_REQUESTS` | `5` | The same for replicate-strategy replicas. |
+
+In each stage replica, one item at a time is processed in a worker thread. Replica health checks and pings are therefore answered during long calls, and a long alignment or diarization is not cut short by a replica restart.
+
+If you run `docker run` without Compose, add `--shm-size=8g --tmpfs /ray-tmp:size=2g,exec --restart unless-stopped` for Ray Serve mode.
+
 ### Model Selection
 
 Available Whisper models (speed vs accuracy tradeoff):
@@ -916,14 +1000,20 @@ docker logs whisperx-asr-api
 # Check service health
 curl http://localhost:9000/health
 
-# Response:
+# Response (shortened):
 {
   "status": "healthy",
   "device": "cuda",
   "loaded_models": ["large-v3"],
-  "serve_mode": "ray"
+  "serve_mode": "ray",
+  "reasons": [],
+  "stages": {"whisper": {"ok": true, "busy": false}, "align": {"ok": true}, "diarize": {"ok": true}},
+  "resources": {"/dev/shm": {"free_pct": 99.9}, "/tmp/whisperx-jobs": {"free_mb": 51200.0}},
+  "admission": {"inflight_requests": 0, "queued_requests": 0, "saturated": false}
 }
 ```
+
+The status code is 503 (`"status": "degraded"`) when shared memory or disk is low or a stage does not answer; `reasons` lists why. See [Health and Restarts](#health-and-restarts) for the thresholds and the watchdog that restarts an unhealthy container.
 
 ### Prometheus Metrics
 
@@ -1136,6 +1226,10 @@ environment:
 
 See [WhisperX Issue #1304](https://github.com/m-bain/whisperX/issues/1304) for more details.
 
+### API Returns 503 Errors
+
+A 503 with a `Retry-After` header and `"error": "busy"` means the admission queue is full ([Admission Control](#admission-control)); retry after the given number of seconds. A 503 with `"error": "unavailable"` means the Ray object store, the disk or a stage replica failed for that request; the request can be retried, and `GET /health` shows whether the service is degraded. A container that stays degraded is restarted (see [Health and Restarts](#health-and-restarts)).
+
 ### API Returns 500 Errors
 
 **Check logs:**
@@ -1263,6 +1357,37 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### Unreleased
+
+**Upgrade notes**
+
+- No configuration changes are required. The new limits are off by default, and responses for admitted requests are unchanged except for the new `diarization` field and `X-Diarization-Status` header when diarization is requested.
+- Compose files from earlier releases: to use the new Ray Serve memory layout, add the `tmpfs` entry for `/ray-tmp` from the current `docker-compose.yml`. Without it, Ray's session files and logs are on the container's disk.
+- The container now exits after sustained failed health checks so that the restart policy can start a fresh one. Set `WATCHDOG_ENABLED=false` to keep the previous behaviour.
+- `/health` is 503 when the service is degraded. Monitors that only check for a response should accept that 503 means a problem.
+
+**Fixes**
+
+- **Long files no longer fill `/dev/shm` in Ray Serve mode:** the decoded audio was passed to each stage through the Ray object store (three copies per request with the split strategy). With a few concurrent multi-hour files, `/dev/shm` filled up, requests failed with "object store is full" or "local disk is full", and the service could stay unusable until a manual restart. The decoded audio is now read from a per-request file in each stage.
+- **Uploads are streamed to disk:** the whole upload was read into memory before `MAX_FILE_SIZE_MB` was checked. The limit is now applied while the file is copied, and from `Content-Length` before the body is read.
+- **Decoding no longer blocks the server:** ffmpeg was run synchronously in the request handler, so `/health` and every other request stalled for the duration of each decode (about 25 seconds for a 6-hour file). Decoding is now done in a background process.
+- **Long stage calls no longer block replica health checks:** stage work is done in a worker thread, so a single alignment or diarization call longer than the 300-second health-check timeout is not cut short by a replica restart.
+- **Ray logs and spilled objects are kept out of `/dev/shm`:** session files and logs are in `RAY_TMPDIR` with log rotation, and objects spill to disk.
+- **Leftover temp files are removed:** uploads left in the temp directory by a crash are removed at container start.
+- **The Docker healthcheck fails on non-200 answers:** any HTTP response, including 500 and 503, counted as healthy.
+- **Failed diarization is reported:** after a diarization error (for example CUDA out of memory), the transcript was returned without speakers and without any sign of the failure. The failure is now marked in the response, and an out-of-memory error is retried once.
+- **Ray errors map to 503:** object store full, out of disk and replica failures are answered with 503 and `Retry-After` instead of 500.
+- **Replicate strategy on CPU:** a GPU was requested for the full-pipeline replica even with `DEVICE=cpu`, so the replica could not start on a machine without one.
+
+**New settings**
+
+- Admission control: `MAX_AUDIO_SECONDS`, `MAX_INFLIGHT_AUDIO_SECONDS`, `MAX_QUEUED_AUDIO_SECONDS`, `MAX_QUEUED_REQUESTS`, `QUEUE_WAIT_TIMEOUT_SECONDS` (all off by default).
+- Job files: `JOB_DIR`, `JOB_TTL_SECONDS`.
+- Health and watchdog: `HEALTH_MIN_SHM_FREE_PCT`, `HEALTH_MIN_DISK_FREE_MB`, `HEALTH_STAGE_TIMEOUT_SECONDS`, `WATCHDOG_ENABLED`, `WATCHDOG_INTERVAL_SECONDS`, `WATCHDOG_FAILURES`, `WATCHDOG_TIMEOUT_SECONDS`, `WATCHDOG_SHM_MAX_USED_PCT`, `WATCHDOG_SHM_FAILURES`.
+- Ray Serve: `RAY_TMPDIR`, `RAY_SPILL_DIR`, `RAY_ROTATION_MAX_BYTES`, `RAY_ROTATION_BACKUP_COUNT`, `STAGE_MAX_ONGOING_REQUESTS` (default 2; it was Ray's default of 5), `PIPELINE_MAX_ONGOING_REQUESTS`.
+- Diarization: `DIARIZE_ON_ERROR`.
+- Metrics: `whisperx_inflight_audio_seconds`, `whisperx_queued_requests`, `whisperx_queued_audio_seconds`, `whisperx_admission_rejections_total`.
 
 ### v0.4.4 (2026-10-23)
 

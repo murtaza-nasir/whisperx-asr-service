@@ -156,3 +156,33 @@ def test_bad_integer_settings_do_not_crash_the_import(tmp_path):
         "MAX_QUEUE_SIZE": "lots",
     })
     _assert_requests_without_a_model_work(report)
+
+
+def test_long_file_and_health_settings_default_to_off_or_generous(tmp_path):
+    """Admission limits are off, health thresholds and the watchdog use their
+    documented defaults, with the documented setup and with every new key
+    left out of the compose environment."""
+    expected = {
+        "admission": {"max_audio_seconds": 0, "max_inflight_audio_seconds": 0,
+                      "max_queued_audio_seconds": 0, "max_queued_requests": 0,
+                      "queue_wait_timeout_seconds": 0},
+        "job_dir": "/tmp/whisperx-jobs",
+        "job_ttl_seconds": 86400,
+        "health_min_shm_free_pct": 5.0,
+        "health_min_disk_free_mb": 500.0,
+        "health_stage_timeout_seconds": 5.0,
+        "watchdog": {"enabled": True, "interval": 30.0, "failures": 6,
+                     "shm_max_used": 98.0, "shm_failures": 4},
+        "diarize_on_error": "flag",
+    }
+    report, container = _probe(MINIMAL_ENV)
+    assert report["robustness"] == expected
+    for key in ("MAX_AUDIO_SECONDS", "MAX_INFLIGHT_AUDIO_SECONDS", "JOB_DIR",
+                "WATCHDOG_ENABLED", "HEALTH_MIN_SHM_FREE_PCT", "RAY_TMPDIR"):
+        assert key in container, f"docker-compose.yml does not forward {key}"
+
+    blank = {key: "" for key in container if key.startswith(
+        ("MAX_AUDIO", "MAX_INFLIGHT", "MAX_QUEUED", "QUEUE_WAIT", "JOB_", "HEALTH_", "WATCHDOG_",
+         "DIARIZE_ON_ERROR"))}
+    report, _ = _probe(MINIMAL_ENV, overrides=blank)
+    assert report["robustness"] == expected
