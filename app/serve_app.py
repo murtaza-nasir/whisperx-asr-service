@@ -17,7 +17,9 @@ import logging
 import warnings
 from typing import Optional, List
 
-from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, Request
+from fastapi import (
+    FastAPI, File, UploadFile, Form, Query, Header, HTTPException, Request,
+)
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import ray
 import ray.exceptions
@@ -43,7 +45,16 @@ from app.pipeline import (
 from app import metrics as prom_metrics
 import app.health as health_mod
 from app.admission import get_controller, AdmissionRejected, AudioTooLong
-from app.audio_io import JOB_DIR, UploadTooLarge
+from app.audio_io import JOB_DIR, UploadTooLarge, AudioDecodeError
+import app.jobs as jobs_mod
+from app.response_format import format_asr_response
+from app.job_runner import (
+    JobManager,
+    disabled_response,
+    not_found_response,
+    too_many_response,
+    poll_after,
+)
 from app.request_flow import (
     admitted_job,
     busy_response,
@@ -179,6 +190,11 @@ class ASRIngress:
         self._stage_models: List[str] = []
         os.makedirs(JOB_DIR, exist_ok=True)
         startup_sweep()
+        # Asynchronous jobs. recover() reports jobs that were in flight when
+        # an earlier process stopped as interrupted instead of losing them.
+        self._jobs = JobManager(self._admission, self._execute_job)
+        if jobs_mod.async_jobs_enabled():
+            self._jobs.recover()
         try:
             if len([n for n in ray.nodes() if n.get("Alive")]) > 1:
                 logger.warning(
@@ -227,6 +243,7 @@ class ASRIngress:
             "device": DEVICE,
             "compute_type": COMPUTE_TYPE,
             "serve_mode": "ray",
+            "capabilities": jobs_mod.capabilities(),
         }
 
     @fastapi_app.get("/health")
@@ -254,14 +271,17 @@ class ASRIngress:
                 "reasons": reasons,
                 "stages": stages,
                 "resources": resources,
+                "capabilities": jobs_mod.capabilities(),
                 "admission": {**self._admission.snapshot(),
                               "saturated": self._admission.saturated(),
                               "limits": self._admission.settings()},
+                "jobs": self._jobs.store.counts(),
             }
             self._health_cache = (now, (code, body))
         body = dict(body, admission={**self._admission.snapshot(),
                                      "saturated": self._admission.saturated(),
-                                     "limits": self._admission.settings()})
+                                     "limits": self._admission.settings()},
+                    jobs=self._jobs.store.counts())
         return JSONResponse(status_code=code, content=body)
 
     @fastapi_app.get("/metrics")
@@ -287,6 +307,257 @@ class ASRIngress:
             "loaded_models": self._stage_models,
             "queue": self._admission.snapshot(),
         }
+
+    # ------------------------------------------------------------------
+    # Asynchronous jobs
+    # ------------------------------------------------------------------
+    @fastapi_app.post("/jobs")
+    async def submit_job(
+        self,
+        audio_file: UploadFile = File(...),
+        task: str = Query("transcribe"),
+        language: Optional[str] = Query(None),
+        initial_prompt: Optional[str] = Query(None),
+        hotwords: Optional[str] = Query(None),
+        word_timestamps: bool = Query(True),
+        model: Optional[str] = Query(None),
+        num_speakers: Optional[int] = Query(None),
+        min_speakers: Optional[int] = Query(None),
+        max_speakers: Optional[int] = Query(None),
+        diarize: Optional[bool] = Query(None),
+        enable_diarization: Optional[bool] = Query(None),
+        return_speaker_embeddings: Optional[bool] = Query(None),
+        idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    ):
+        """Accept an upload and return a job id.
+
+        The upload is received and decoded before the response, so audio that
+        is too long is refused here with 413 and audio that cannot be decoded
+        with 400. Waiting for the pipeline happens afterwards, so the client
+        may disconnect. A submit identical to one already queued, running or
+        finished answers 200 with that job id and `deduplicated` true.
+        """
+        request_started = time.time()
+        if not jobs_mod.async_jobs_enabled():
+            return disabled_response()
+        try:
+            model = resolve_model_name(model)
+        except InvalidModelError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if diarize is not None or enable_diarization is not None:
+            should_diarize = (diarize is True) or (enable_diarization is True)
+        else:
+            should_diarize = True
+        params = {
+            "model": model,
+            "language": language,
+            "task": task,
+            "initial_prompt": initial_prompt,
+            "hotwords": hotwords,
+            "word_timestamps": word_timestamps,
+            "should_diarize": should_diarize,
+            "num_speakers": num_speakers,
+            "min_speakers": min_speakers,
+            "max_speakers": max_speakers,
+            "return_speaker_embeddings": bool(return_speaker_embeddings),
+        }
+        metric_status = "error"
+        try:
+            try:
+                job, deduplicated = await self._jobs.submit(
+                    audio_file, params, MAX_FILE_SIZE_MB, idempotency_key,
+                )
+            except UploadTooLarge as e:
+                metric_status = "http_413"
+                return too_large_response(e)
+            except AudioTooLong as e:
+                metric_status = "http_413"
+                prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+                return too_large_response(e, code="audio_too_long")
+            except jobs_mod.TooManyJobs as e:
+                metric_status = "http_503"
+                prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_many_jobs").inc()
+                return too_many_response(e, self._admission.retry_after())
+            except AudioDecodeError as e:
+                metric_status = "http_400"
+                raise HTTPException(status_code=400, detail=str(e))
+            body = self._jobs.snapshot(job, deduplicated=deduplicated)
+            body["poll_after_seconds"] = poll_after(job)
+            code = 200 if deduplicated else 202
+            metric_status = f"http_{code}"
+            logger.info(
+                f"Job {job.id} {'reused' if deduplicated else 'accepted'} for "
+                f"{job.filename} ({job.audio_seconds or 0:.0f}s)"
+            )
+            return JSONResponse(status_code=code, content=body,
+                                headers={"Location": body["status_url"]})
+        except HTTPException as e:
+            metric_status = f"http_{e.status_code}"
+            raise
+        finally:
+            prom_metrics.REQUEST_DURATION.labels(endpoint="/jobs").observe(
+                time.time() - request_started)
+            prom_metrics.REQUESTS_TOTAL.labels(endpoint="/jobs", status=metric_status).inc()
+
+    @fastapi_app.get("/jobs")
+    async def list_jobs(self, limit: int = Query(50, ge=1, le=500)):
+        """Jobs this process knows about, newest first."""
+        if not jobs_mod.async_jobs_enabled():
+            return disabled_response()
+        self._jobs.store.forget_expired()
+        return {
+            "jobs": [self._jobs.snapshot(j) for j in self._jobs.store.list()[:limit]],
+            "counts": self._jobs.store.counts(),
+        }
+
+    @fastapi_app.get("/jobs/{job_id}")
+    async def job_status(self, job_id: str):
+        """Status and progress of one job. Cheap: no stage calls, and
+        admission control does not apply."""
+        if not jobs_mod.async_jobs_enabled():
+            return disabled_response()
+        try:
+            job = self._jobs.store.get(job_id)
+        except jobs_mod.JobNotFound:
+            return not_found_response(job_id)
+        body = self._jobs.snapshot(job)
+        body["poll_after_seconds"] = poll_after(job)
+        headers = {"Retry-After": str(body["poll_after_seconds"])} if job.active else {}
+        return JSONResponse(content=body, headers=headers)
+
+    @fastapi_app.get("/jobs/{job_id}/result")
+    async def job_result(
+        self,
+        job_id: str,
+        output_format: str = Query("json"),
+        output: Optional[str] = Query(None),
+    ):
+        """The finished transcription, in the requested format.
+
+        202 with Retry-After while the job is unfinished, 409 when it ended
+        without a result, 404 when it is unknown or has expired.
+        """
+        if not jobs_mod.async_jobs_enabled():
+            return disabled_response()
+        if output is not None:
+            output_format = output
+        try:
+            job = self._jobs.store.get(job_id)
+        except jobs_mod.JobNotFound:
+            return not_found_response(job_id)
+        if job.active:
+            body = self._jobs.snapshot(job)
+            body["poll_after_seconds"] = poll_after(job)
+            return JSONResponse(status_code=202, content=body,
+                                headers={"Retry-After": str(body["poll_after_seconds"])})
+        if job.status != jobs_mod.DONE:
+            return JSONResponse(status_code=409, content=self._jobs.snapshot(job))
+        try:
+            payload = job.load_result()
+        except (OSError, ValueError):
+            return not_found_response(job_id)
+        result = payload.get("result") or {}
+        embeddings = payload.get("speaker_embeddings")
+        detected_language = result.get("language", job.params.get("language") or "en")
+        diarization, diarization_header = diarization_fields(result)
+        response = self._format_asr_response(
+            result, detected_language, output_format,
+            bool(job.params.get("return_speaker_embeddings")), embeddings, diarization,
+        )
+        if diarization_header:
+            response.headers["X-Diarization-Status"] = diarization_header
+        return response
+
+    @fastapi_app.delete("/jobs/{job_id}")
+    async def cancel_job(self, job_id: str):
+        """Cancel a queued or running job, or drop a finished transcript.
+        Answers with the job's final state."""
+        if not jobs_mod.async_jobs_enabled():
+            return disabled_response()
+        try:
+            job = self._jobs.store.get(job_id)
+        except jobs_mod.JobNotFound:
+            return not_found_response(job_id)
+        await self._jobs.cancel(job)
+        return JSONResponse(content=self._jobs.snapshot(job))
+
+    async def _execute_job(self, pcm_path, params: dict, progress):
+        """Stage runner for one asynchronous job."""
+        result, embeddings = await self._run_stages(pcm_path, params, progress)
+        return result, embeddings, {}
+
+    async def _run_stages(self, audio, params: dict, progress=None):
+        """Run the configured stages over a decoded job file.
+
+        Used by /asr and by asynchronous jobs, so both take exactly the same
+        path through the pipeline. `progress` is called with the stage name as
+        each one starts.
+        """
+        model = params.get("model")
+        language = params.get("language")
+        task = params.get("task") or "transcribe"
+        initial_prompt = params.get("initial_prompt")
+        hotwords = params.get("hotwords")
+        word_timestamps = params.get("word_timestamps", True)
+        should_diarize = params.get("should_diarize", True)
+        num_speakers = params.get("num_speakers")
+        min_speakers = params.get("min_speakers")
+        max_speakers = params.get("max_speakers")
+        return_speaker_embeddings = params.get("return_speaker_embeddings", False)
+
+        def _stage(name):
+            if progress is not None:
+                progress(name)
+
+        if self._pipeline:
+            _stage("pipeline")
+            result, speaker_embeddings = await self._call(
+                "pipeline", self._pipeline.run,
+                audio, model_name=model, language=language,
+                task=task, initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                word_timestamps=word_timestamps,
+                should_diarize=should_diarize,
+                num_speakers=num_speakers, min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                return_speaker_embeddings=return_speaker_embeddings,
+            )
+        else:
+            _stage("whisper")
+            result = await self._call(
+                "whisper", self._whisper.transcribe,
+                audio, model_name=model, language=language,
+                task=task, initial_prompt=initial_prompt,
+                hotwords=hotwords,
+            )
+            # qwen3 and text-only external segments are coarse chunks
+            # until aligned, so speaker assignment needs word timestamps
+            # even if the caller did not request them.
+            internally_aligned = (
+                result.get("_asr_backend") == "qwen3"
+                or result.get("_qwen_align")
+            )
+            if word_timestamps or (should_diarize and internally_aligned):
+                _stage("align")
+                result = await self._call("align", self._align.align, audio, result)
+            speaker_embeddings = None
+            if should_diarize:
+                _stage("diarize")
+                result, speaker_embeddings = await self._call(
+                    "diarize", self._diarize.diarize,
+                    audio, result,
+                    num_speakers=num_speakers, min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    return_speaker_embeddings=return_speaker_embeddings,
+                )
+            if not word_timestamps and internally_aligned:
+                result.pop("word_segments", None)
+                for seg in result.get("segments", []):
+                    seg.pop("words", None)
+            result.pop("_asr_backend", None)
+            result.pop("_language_name", None)
+            result.pop("_qwen_align", None)
+        return result, speaker_embeddings
 
     # ------------------------------------------------------------------
     # /asr endpoint
@@ -342,50 +613,19 @@ class ASRIngress:
                 )
                 audio = job.pcm_path
 
-                if self._pipeline:
-                    result, speaker_embeddings = await self._call(
-                        "pipeline", self._pipeline.run,
-                        audio, model_name=model, language=language,
-                        task=task, initial_prompt=initial_prompt,
-                        hotwords=hotwords,
-                        word_timestamps=word_timestamps,
-                        should_diarize=should_diarize,
-                        num_speakers=num_speakers, min_speakers=min_speakers,
-                        max_speakers=max_speakers,
-                        return_speaker_embeddings=return_speaker_embeddings,
-                    )
-                else:
-                    result = await self._call(
-                        "whisper", self._whisper.transcribe,
-                        audio, model_name=model, language=language,
-                        task=task, initial_prompt=initial_prompt,
-                        hotwords=hotwords,
-                    )
-                    # qwen3 and text-only external segments are coarse chunks
-                    # until aligned, so speaker assignment needs word timestamps
-                    # even if the caller did not request them.
-                    internally_aligned = (
-                        result.get("_asr_backend") == "qwen3"
-                        or result.get("_qwen_align")
-                    )
-                    if word_timestamps or (should_diarize and internally_aligned):
-                        result = await self._call("align", self._align.align, audio, result)
-                    speaker_embeddings = None
-                    if should_diarize:
-                        result, speaker_embeddings = await self._call(
-                            "diarize", self._diarize.diarize,
-                            audio, result,
-                            num_speakers=num_speakers, min_speakers=min_speakers,
-                            max_speakers=max_speakers,
-                            return_speaker_embeddings=return_speaker_embeddings,
-                        )
-                    if not word_timestamps and internally_aligned:
-                        result.pop("word_segments", None)
-                        for seg in result.get("segments", []):
-                            seg.pop("words", None)
-                    result.pop("_asr_backend", None)
-                    result.pop("_language_name", None)
-                    result.pop("_qwen_align", None)
+                result, speaker_embeddings = await self._run_stages(audio, {
+                    "model": model,
+                    "language": language,
+                    "task": task,
+                    "initial_prompt": initial_prompt,
+                    "hotwords": hotwords,
+                    "word_timestamps": word_timestamps,
+                    "should_diarize": should_diarize,
+                    "num_speakers": num_speakers,
+                    "min_speakers": min_speakers,
+                    "max_speakers": max_speakers,
+                    "return_speaker_embeddings": return_speaker_embeddings,
+                })
 
             detected_language = result.get("language", language or "en")
             diarization, diarization_header = diarization_fields(result)
@@ -656,59 +896,10 @@ class ASRIngress:
     def _format_asr_response(result, detected_language, output_format,
                              return_speaker_embeddings, speaker_embeddings,
                              diarization=None):
-        if output_format == "json":
-            response_data = {
-                "text": result.get("segments", []),
-                "language": detected_language,
-                "segments": result.get("segments", []),
-                "word_segments": result.get("word_segments", []),
-            }
-            if return_speaker_embeddings and speaker_embeddings:
-                response_data["speaker_embeddings"] = sanitize_float_values(speaker_embeddings)
-            if diarization:
-                response_data["diarization"] = diarization
-            return JSONResponse(content=response_data)
-
-        elif output_format == "text":
-            text = " ".join([seg.get("text", "") for seg in result.get("segments", [])])
-            return JSONResponse(content={"text": text})
-
-        elif output_format == "srt":
-            srt_content = []
-            for i, segment in enumerate(result.get("segments", []), 1):
-                start_time = format_timestamp(segment.get("start", 0))
-                end_time = format_timestamp(segment.get("end", 0))
-                text = segment.get("text", "").strip()
-                speaker = segment.get("speaker", "")
-                if speaker:
-                    text = f"[{speaker}] {text}"
-                srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
-            return JSONResponse(content={"srt": "\n".join(srt_content)})
-
-        elif output_format == "vtt":
-            vtt_content = ["WEBVTT\n"]
-            for segment in result.get("segments", []):
-                start_time = format_timestamp(segment.get("start", 0)).replace(",", ".")
-                end_time = format_timestamp(segment.get("end", 0)).replace(",", ".")
-                text = segment.get("text", "").strip()
-                speaker = segment.get("speaker", "")
-                if speaker:
-                    text = f"[{speaker}] {text}"
-                vtt_content.append(f"{start_time} --> {end_time}\n{text}\n")
-            return JSONResponse(content={"vtt": "\n".join(vtt_content)})
-
-        elif output_format == "tsv":
-            tsv_content = ["start\tend\ttext\tspeaker"]
-            for segment in result.get("segments", []):
-                start = segment.get("start", 0)
-                end = segment.get("end", 0)
-                text = segment.get("text", "").strip()
-                speaker = segment.get("speaker", "")
-                tsv_content.append(f"{start}\t{end}\t{text}\t{speaker}")
-            return JSONResponse(content={"tsv": "\n".join(tsv_content)})
-
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported output format: {output_format}")
+        return format_asr_response(
+            result, detected_language, output_format,
+            return_speaker_embeddings, speaker_embeddings, diarization,
+        )
 
 
 # ------------------------------------------------------------------

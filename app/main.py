@@ -10,7 +10,7 @@ import warnings
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, Query, HTTPException
+from fastapi import FastAPI, File, UploadFile, Query, HTTPException, Header
 from fastapi.responses import JSONResponse, Response
 
 from app.version import __version__
@@ -37,7 +37,16 @@ from app.queue import run_in_queue, get_queue_metrics
 from app import metrics as prom_metrics
 import app.health as health_mod
 from app.admission import get_controller, AdmissionRejected, AudioTooLong
-from app.audio_io import JOB_DIR, UploadTooLarge, load_pcm
+from app.audio_io import JOB_DIR, UploadTooLarge, AudioDecodeError, load_pcm
+import app.jobs as jobs_mod
+from app.job_runner import (
+    JobManager,
+    disabled_response,
+    not_found_response,
+    too_many_response,
+    poll_after,
+)
+from app.response_format import format_asr_response
 from app.request_flow import (
     admitted_job,
     busy_response,
@@ -76,6 +85,8 @@ async def lifespan(app: FastAPI):
     prom_metrics.bind_admission(get_controller())
     os.makedirs(JOB_DIR, exist_ok=True)
     startup_sweep()
+    if jobs_mod.async_jobs_enabled():
+        get_jobs().recover()
     preload_whisper_model("startup")
     yield
 
@@ -94,6 +105,41 @@ def _run_pipeline_on_file(pcm_path, **kwargs):
     """Worker-thread entry: load the decoded job file, then run the pipeline."""
     return run_pipeline(load_pcm(pcm_path), **kwargs)
 
+
+async def _execute_job(pcm_path, params, progress):
+    """Stage runner for one asynchronous job in simple mode.
+
+    Simple mode runs the whole pipeline in one call, so there is one stage.
+    """
+    progress("pipeline")
+    result, speaker_embeddings = await run_in_queue(
+        _run_pipeline_on_file,
+        pcm_path,
+        model_name=params.get("model"),
+        language=params.get("language"),
+        task=params.get("task") or "transcribe",
+        initial_prompt=params.get("initial_prompt"),
+        hotwords=params.get("hotwords"),
+        word_timestamps=params.get("word_timestamps", True),
+        should_diarize=params.get("should_diarize", True),
+        num_speakers=params.get("num_speakers"),
+        min_speakers=params.get("min_speakers"),
+        max_speakers=params.get("max_speakers"),
+        return_speaker_embeddings=params.get("return_speaker_embeddings", False),
+    )
+    return result, speaker_embeddings, {}
+
+
+_jobs: Optional[JobManager] = None
+
+
+def get_jobs() -> JobManager:
+    """Process-wide job manager."""
+    global _jobs
+    if _jobs is None:
+        _jobs = JobManager(get_controller(), _execute_job)
+    return _jobs
+
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
 logger.info(f"Models: {describe_model_settings()}; serve mode: {SERVE_MODE}")
@@ -108,6 +154,7 @@ async def root():
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
         "serve_mode": SERVE_MODE,
+        "capabilities": jobs_mod.capabilities(),
     }
 
 
@@ -317,9 +364,153 @@ async def health_check():
         "serve_mode": SERVE_MODE,
         "reasons": reasons,
         "resources": resources,
+        "capabilities": jobs_mod.capabilities(),
         "admission": {**controller.snapshot(), "saturated": controller.saturated(),
                       "limits": controller.settings()},
+        "jobs": get_jobs().store.counts(),
     })
+
+
+@app.post("/jobs")
+async def submit_job(
+    audio_file: UploadFile = File(...),
+    task: str = Query("transcribe"),
+    language: Optional[str] = Query(None),
+    initial_prompt: Optional[str] = Query(None),
+    hotwords: Optional[str] = Query(None),
+    word_timestamps: bool = Query(True),
+    model: Optional[str] = Query(None),
+    num_speakers: Optional[int] = Query(None),
+    min_speakers: Optional[int] = Query(None),
+    max_speakers: Optional[int] = Query(None),
+    diarize: Optional[bool] = Query(None),
+    enable_diarization: Optional[bool] = Query(None),
+    return_speaker_embeddings: Optional[bool] = Query(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    """Accept an upload and return a job id."""
+    if not jobs_mod.async_jobs_enabled():
+        return disabled_response()
+    try:
+        model = resolve_model_name(model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if diarize is not None or enable_diarization is not None:
+        should_diarize = (diarize is True) or (enable_diarization is True)
+    else:
+        should_diarize = True
+    params = {
+        "model": model,
+        "language": language,
+        "task": task,
+        "initial_prompt": initial_prompt,
+        "hotwords": hotwords,
+        "word_timestamps": word_timestamps,
+        "should_diarize": should_diarize,
+        "num_speakers": num_speakers,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
+        "return_speaker_embeddings": bool(return_speaker_embeddings),
+    }
+    manager = get_jobs()
+    try:
+        job, deduplicated = await manager.submit(
+            audio_file, params, MAX_FILE_SIZE_MB, idempotency_key,
+        )
+    except UploadTooLarge as e:
+        return too_large_response(e)
+    except AudioTooLong as e:
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_long").inc()
+        return too_large_response(e, code="audio_too_long")
+    except jobs_mod.TooManyJobs as e:
+        prom_metrics.ADMISSION_REJECTIONS.labels(reason="too_many_jobs").inc()
+        return too_many_response(e, get_controller().retry_after())
+    except AudioDecodeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    body = manager.snapshot(job, deduplicated=deduplicated)
+    body["poll_after_seconds"] = poll_after(job)
+    code = 200 if deduplicated else 202
+    return JSONResponse(status_code=code, content=body,
+                        headers={"Location": body["status_url"]})
+
+
+@app.get("/jobs")
+async def list_jobs(limit: int = Query(50, ge=1, le=500)):
+    """Jobs this process knows about, newest first."""
+    if not jobs_mod.async_jobs_enabled():
+        return disabled_response()
+    manager = get_jobs()
+    manager.store.forget_expired()
+    return {
+        "jobs": [manager.snapshot(j) for j in manager.store.list()[:limit]],
+        "counts": manager.store.counts(),
+    }
+
+
+@app.get("/jobs/{job_id}")
+async def job_status(job_id: str):
+    """Status and progress of one job."""
+    if not jobs_mod.async_jobs_enabled():
+        return disabled_response()
+    manager = get_jobs()
+    try:
+        job = manager.store.get(job_id)
+    except jobs_mod.JobNotFound:
+        return not_found_response(job_id)
+    body = manager.snapshot(job)
+    body["poll_after_seconds"] = poll_after(job)
+    headers = {"Retry-After": str(body["poll_after_seconds"])} if job.active else None
+    return JSONResponse(content=body, headers=headers)
+
+
+@app.get("/jobs/{job_id}/result")
+async def job_result(job_id: str, output_format: str = Query("json"),
+                     output: Optional[str] = Query(None)):
+    """The finished transcription, in the requested format."""
+    if not jobs_mod.async_jobs_enabled():
+        return disabled_response()
+    if output is not None:
+        output_format = output
+    manager = get_jobs()
+    try:
+        job = manager.store.get(job_id)
+    except jobs_mod.JobNotFound:
+        return not_found_response(job_id)
+    if job.active:
+        body = manager.snapshot(job)
+        body["poll_after_seconds"] = poll_after(job)
+        return JSONResponse(status_code=202, content=body,
+                            headers={"Retry-After": str(body["poll_after_seconds"])})
+    if job.status != jobs_mod.DONE:
+        return JSONResponse(status_code=409, content=manager.snapshot(job))
+    try:
+        payload = job.load_result()
+    except (OSError, ValueError):
+        return not_found_response(job_id)
+    result = payload.get("result") or {}
+    embeddings = payload.get("speaker_embeddings")
+    detected_language = result.get("language", job.params.get("language") or "en")
+    diarization, diarization_header = diarization_fields(result)
+    headers = {"X-Diarization-Status": diarization_header} if diarization_header else None
+    return format_asr_response(
+        result, detected_language, output_format,
+        bool(job.params.get("return_speaker_embeddings")), embeddings, diarization,
+        headers=headers,
+    )
+
+
+@app.delete("/jobs/{job_id}")
+async def cancel_job(job_id: str):
+    """Cancel a queued or running job, or drop a finished transcript."""
+    if not jobs_mod.async_jobs_enabled():
+        return disabled_response()
+    manager = get_jobs()
+    try:
+        job = manager.store.get(job_id)
+    except jobs_mod.JobNotFound:
+        return not_found_response(job_id)
+    await manager.cancel(job)
+    return JSONResponse(content=manager.snapshot(job))
 
 
 @app.get("/metrics")
