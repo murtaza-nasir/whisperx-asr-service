@@ -36,6 +36,10 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# Marks "use the configured value" so a caller can pass wait_timeout=None
+# to wait without a deadline.
+_UNSET = object()
+
 RETRY_AFTER_MIN_SECONDS = 30
 RETRY_AFTER_MAX_SECONDS = 3600
 # Starting throughput guess (audio seconds per wall-clock second) until the
@@ -191,25 +195,35 @@ class AdmissionController:
             self._grant(head.seconds)
             head.future.set_result(True)
 
-    async def acquire(self, seconds: float) -> float:
+    async def acquire(self, seconds: float, *, enforce_queue_bounds: bool = True,
+                      wait_timeout=_UNSET) -> float:
         """Wait for room for `seconds` of audio. Returns the reserved amount,
-        to be passed to release()."""
+        to be passed to release().
+
+        `enforce_queue_bounds=False` and `wait_timeout=None` are used by
+        asynchronous jobs, which are already accepted and bounded by
+        MAX_ASYNC_JOBS: they wait for the in-flight limit without a deadline
+        instead of being rejected after the fact. Synchronous callers pass
+        neither and behave exactly as before.
+        """
         seconds = max(0.0, float(seconds or 0.0))
+        timeout = self.wait_timeout if wait_timeout is _UNSET else wait_timeout
         self.check_length(seconds)
         if not self._queue and self._fits(seconds):
             self._grant(seconds)
             return seconds
-        if self.max_queued_requests and len(self._queue) >= self.max_queued_requests:
-            raise self._reject("queue_full", seconds)
-        if self.max_queued_seconds and self.queued_seconds + seconds > self.max_queued_seconds:
-            raise self._reject("queue_audio_full", seconds)
+        if enforce_queue_bounds:
+            if self.max_queued_requests and len(self._queue) >= self.max_queued_requests:
+                raise self._reject("queue_full", seconds)
+            if self.max_queued_seconds and self.queued_seconds + seconds > self.max_queued_seconds:
+                raise self._reject("queue_audio_full", seconds)
 
         loop = asyncio.get_running_loop()
         waiter = _Waiter(seconds, loop.create_future())
         self._queue.append(waiter)
         try:
-            if self.wait_timeout:
-                await asyncio.wait_for(asyncio.shield(waiter.future), timeout=self.wait_timeout)
+            if timeout:
+                await asyncio.wait_for(asyncio.shield(waiter.future), timeout=timeout)
             else:
                 await waiter.future
         except asyncio.TimeoutError:
@@ -245,8 +259,8 @@ class AdmissionController:
         self._wake()
 
     @contextlib.asynccontextmanager
-    async def slot(self, seconds: float):
-        reserved = await self.acquire(seconds)
+    async def slot(self, seconds: float, **kwargs):
+        reserved = await self.acquire(seconds, **kwargs)
         started = time.monotonic()
         ok = False
         try:
