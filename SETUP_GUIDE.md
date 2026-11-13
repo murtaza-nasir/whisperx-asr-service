@@ -320,7 +320,9 @@ docker compose restart
 | `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit); further submits answer 503 |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
 
-A job waits for room in the pipeline without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog. Synchronous requests keep the admission queue bounds. Finished results are held under `JOB_DIR` and removed with the job directory when the TTL passes, so `JOB_DIR` needs room for the transcripts that are kept.
+A job waits for room in the pipeline without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog. Synchronous requests keep the admission queue bounds.
+
+Decoding happens at submit, so a queued job holds its decoded audio, about 115 MB per hour of it, until the job ends: at the default of 16 jobs of 8 hours each, about 15 GB under `JOB_DIR`. A finished job keeps only its transcript and state until `JOB_RESULT_TTL_SECONDS` passes.
 
 ### Performance Tuning
 

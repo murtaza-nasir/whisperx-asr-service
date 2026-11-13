@@ -461,6 +461,8 @@ A queued job is dropped, and for a running job the stage call is cancelled, whic
 
 Admission control still governs the pipeline: a job waits for `MAX_INFLIGHT_AUDIO_SECONDS` without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog instead. Synchronous requests keep the queue bounds and `QUEUE_WAIT_TIMEOUT_SECONDS`.
 
+`MAX_ASYNC_JOBS` also sets the disk the backlog can hold. Decoding happens at submit, so a queued job keeps its decoded audio, about 115 MB per hour of it, until the job ends. At the default of 16 jobs of 8 hours each, that is about 15 GB under `JOB_DIR`. A finished job keeps only its transcript and its state, which are small, until `JOB_RESULT_TTL_SECONDS` passes. `HEALTH_MIN_DISK_FREE_MB` makes `/health` report 503 before the directory fills.
+
 **Detecting the surface**
 
 `/health` and `/` report what this build offers:
