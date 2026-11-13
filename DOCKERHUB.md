@@ -63,6 +63,10 @@ Generate a read token at https://huggingface.co/settings/tokens and pass it as `
 | `POST /v1/audio/transcriptions` | OpenAI-compatible transcription |
 | `POST /v1/audio/translations` | OpenAI-compatible translation |
 | `GET /v1/models` | List available models |
+| `POST /jobs` | Submit a transcription and receive a job id |
+| `GET /jobs/{id}` | Job status and progress |
+| `GET /jobs/{id}/result` | Finished transcription, in any output format |
+| `DELETE /jobs/{id}` | Cancel a job or drop a finished transcript |
 | `GET /health` | Health probe |
 | `GET /metrics` | Prometheus OpenMetrics text |
 | `GET /queue-metrics` | Legacy JSON queue snapshot |
@@ -85,6 +89,11 @@ Common environment variables. Full reference is in the GitHub README.
 | `SERVE_MODE` | `simple` | `simple` (uvicorn) or `ray` (Ray Serve with batching) |
 | `MODEL_KEEP_ALIVE_SECONDS` | `0` (disabled) | Unload idle Whisper models after this many seconds |
 | `MODEL_EVICTION_INTERVAL_SECONDS` | `60` (floor 30) | Sweep cadence for the eviction daemon |
+| `ASYNC_JOBS_ENABLED` | `true` | Offer the `/jobs` API |
+| `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit) |
+| `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
+
+A submit to `/jobs` answers with a job id while the transcription continues on the server, which suits recordings that take longer than a client is willing to wait. Identical submits attach to the job already in progress. The service has no authentication, so a job id is the only gate on its transcript.
 
 For multi-GPU, Ray Serve, pipeline strategies, hotwords, OpenAI-compatible parameters, offline use, and the full Prometheus metrics catalogue, see the [GitHub README](https://github.com/murtaza-nasir/whisperx-asr-service#readme).
 

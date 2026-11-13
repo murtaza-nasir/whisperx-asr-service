@@ -345,6 +345,134 @@ curl -X POST http://localhost:9000/asr \
 }
 ```
 
+### Asynchronous Jobs
+
+A submit returns a job id at once and the transcription continues on the server, so a client timeout or a dropped connection does not lose the work. The synchronous endpoints are unchanged; this surface is an addition, and `ASYNC_JOBS_ENABLED=false` removes it.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /jobs` | Accept an upload and return a job id. |
+| `GET /jobs/{job_id}` | Status and progress. |
+| `GET /jobs/{job_id}/result` | The finished transcription, in the requested format. |
+| `DELETE /jobs/{job_id}` | Cancel a job, or drop a finished transcript. |
+| `GET /jobs` | The jobs this process knows about, newest first. |
+
+`POST /jobs` takes the same file field and the same parameters as `/asr`, apart from `output_format`. The raw result is stored and formatted when it is fetched, so one job serves every format.
+
+The upload is received and decoded before the submit answers. A file longer than `MAX_AUDIO_SECONDS` is therefore refused at submit with **413**, audio that cannot be decoded with **400**, and no job is created in either case. Only the wait for the pipeline happens in the background.
+
+**Submit**
+
+```bash
+curl -X POST "http://localhost:9000/jobs?diarize=true&language=en" \
+  -F "audio_file=@meeting.mp3"
+```
+
+```json
+{
+  "job_id": "9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e",
+  "status": "queued",
+  "audio_seconds": 7412.4,
+  "filename": "meeting.mp3",
+  "progress": {"stage": null, "fraction": 0.0, "fraction_estimated": true,
+               "elapsed_seconds": 0.0, "eta_seconds": null},
+  "error": null,
+  "deduplicated": false,
+  "submissions": 1,
+  "poll_after_seconds": 10,
+  "status_url": "/jobs/9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e",
+  "result_url": "/jobs/9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e/result"
+}
+```
+
+The answer is **202** for a new job and **200** for one that already exists (see Deduplication). A `Location` header carries the status URL. When more than `MAX_ASYNC_JOBS` jobs are queued or running, the answer is **503** with `Retry-After`.
+
+**Poll**
+
+```bash
+curl "http://localhost:9000/jobs/9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e"
+```
+
+Status is one of:
+
+| Status | Meaning |
+|---|---|
+| `queued` | Accepted, waiting for room in the pipeline. |
+| `running` | In a stage. |
+| `done` | The result is ready. |
+| `error` | The run failed; `error` says why. |
+| `cancelled` | Cancelled through `DELETE`. |
+| `interrupted` | The service restarted while the job was in flight. Submit it again. |
+
+`progress.stage` is the stage now running (`whisper`, `align`, `diarize`, or `pipeline` with the replicate strategy) and is exact. `progress.fraction` is an estimate from the stage weights and the measured throughput, which is why `fraction_estimated` is reported beside it. It reads `1.0` with `fraction_estimated` false once the job is done.
+
+`poll_after_seconds` is a suggested wait, and the same number is sent as `Retry-After` while a job is unfinished.
+
+**Fetch the result**
+
+```bash
+curl "http://localhost:9000/jobs/9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e/result?output_format=srt"
+```
+
+The body and the `X-Diarization-Status` header are those of the synchronous endpoints. While the job is unfinished the answer is **202** with the status body and `Retry-After`; for a job that ended without a result it is **409**; for a job that is unknown or has expired it is **404**.
+
+A finished result stays fetchable for `JOB_RESULT_TTL_SECONDS` and is then removed with its directory.
+
+**Errors**
+
+A failed job carries an object, so a client can decide whether to try again:
+
+```json
+{"code": "out_of_memory", "message": "CUDA out of memory", "retryable": true}
+```
+
+| Code | Retryable |
+|---|---|
+| `audio_too_long`, `file_too_large`, `decode_failed`, `invalid_request` | No |
+| `out_of_memory`, `unavailable`, `stage_failed`, `interrupted`, `internal` | Yes |
+
+**Deduplication**
+
+A submit that matches a job which is queued, running or finished returns that job id with `"deduplicated": true` instead of starting a second run. Two submits match when the transcription parameters are equal and either the uploaded bytes hash to the same value or the same `Idempotency-Key` header was sent:
+
+```bash
+curl -X POST "http://localhost:9000/jobs" \
+  -H "Idempotency-Key: recording-5182" \
+  -F "audio_file=@meeting.mp3"
+```
+
+With a key, the key stands in for the content hash, so re-encoding the same recording still attaches to the first job. A key that stays the same while the audio changes also attaches to the first job, so the key has to change when the audio does. Changed parameters always start a new job, so reprocessing with other settings never returns the earlier result. A job that failed, was cancelled or was interrupted is not reused.
+
+**Cancel**
+
+```bash
+curl -X DELETE "http://localhost:9000/jobs/9f8c1d0e4b7a42f38e5c6d7a8b9c0d1e"
+```
+
+A queued job is dropped, and for a running job the stage call is cancelled, which releases the GPU once the stage returns. A job that finished between the poll and the cancel has its stored transcript removed. The answer carries the job's final state.
+
+**Settings**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ASYNC_JOBS_ENABLED` | `true` | When false, every `/jobs` path answers 404 and the capability is advertised as absent. |
+| `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit). Further submits are refused with 503. |
+| `JOB_RESULT_TTL_SECONDS` | `JOB_TTL_SECONDS` (86400) | How long a finished result stays fetchable. |
+
+Admission control still governs the pipeline: a job waits for `MAX_INFLIGHT_AUDIO_SECONDS` without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog instead. Synchronous requests keep the queue bounds and `QUEUE_WAIT_TIMEOUT_SECONDS`.
+
+**Detecting the surface**
+
+`/health` and `/` report what this build offers:
+
+```json
+{"capabilities": {"async_jobs": true, "jobs_api_version": 1, "dedupe": true,
+                  "idempotency_key": true, "progress": true, "cancel": true,
+                  "job_result_ttl_seconds": 86400, "max_async_jobs": 16}}
+```
+
+`/health` also reports `jobs` with the counts of jobs known, active, queued and running. Queue state for deciding whether to submit is in the existing `admission` block.
+
 ### Advanced Speaker Diarization Features
 
 #### Exact Speaker Count
@@ -457,7 +585,6 @@ curl -X POST "http://localhost:9000/asr?language=en&hotwords=Speakr,CTranslate2,
 | CTranslate2 | ctranslate2 | CTranslate2 | CTranslate2 |
 | PyAnnote | PnNote | PyAnnote | PyAnnote |
 | Speakr | Speaker | Speaker | Speakr |
-
 `hotwords` alone fixes most spelling issues. Words that sound identical to common English words (like "Speakr" vs "Speaker") may need `initial_prompt` as well to provide enough context for the model to override its default.
 
 The OpenAI-compatible endpoints (`/v1/audio/transcriptions`) also support a `hotwords` form field. If only `prompt` is provided, it is used as hotwords.
@@ -560,6 +687,11 @@ MAX_FILE_SIZE_MB=1000
 # MAX_QUEUED_AUDIO_SECONDS=0
 # MAX_QUEUED_REQUESTS=0
 # QUEUE_WAIT_TIMEOUT_SECONDS=0
+
+# Asynchronous jobs (POST /jobs). See "Asynchronous Jobs" above.
+# ASYNC_JOBS_ENABLED=true
+# MAX_ASYNC_JOBS=16
+# JOB_RESULT_TTL_SECONDS=86400
 
 # Idle model eviction (default disabled). When > 0, Whisper models that have
 # not served a request in this many seconds are unloaded from memory by a
@@ -1261,6 +1393,8 @@ If exposing to a network:
 - Consider putting behind a reverse proxy
 - Store HF_TOKEN securely (use `.env` file, not hardcoded)
 
+Because there is no authentication, a job id is the only thing standing between a request and the transcript it belongs to. Ids are 128 random bits, and `GET /jobs` lists the ids this process knows about. Set `ASYNC_JOBS_ENABLED=false` where that listing is not acceptable, and put the service behind a proxy that authenticates.
+
 ## Maintenance
 
 ### Updating WhisperX
@@ -1358,14 +1492,24 @@ For issues and questions:
 
 ## Changelog
 
-### Unreleased
+### v0.5.0 (2026-11-13)
 
 **Upgrade notes**
 
 - No configuration changes are required. The new limits are off by default, and responses for admitted requests are unchanged except for the new `diarization` field and `X-Diarization-Status` header when diarization is requested.
+- The asynchronous job API is new and is on by default. The existing endpoints are unchanged, so a client that does not use `/jobs` is unaffected. Set `ASYNC_JOBS_ENABLED=false` to leave the paths answering 404.
+- `/health` and `/` gained a `capabilities` object, and `/health` gained `jobs` counts. Both are additions; every field earlier versions answered with is still present.
+- Because the service has no authentication, a job id is the only gate on the transcript it belongs to, and `GET /jobs` lists the ids this process knows about. See "Security Notes".
 - Compose files from earlier releases: to use the new Ray Serve memory layout, add the `tmpfs` entry for `/ray-tmp` from the current `docker-compose.yml`. Without it, Ray's session files and logs are on the container's disk.
 - The container now exits after sustained failed health checks so that the restart policy can start a fresh one. Set `WATCHDOG_ENABLED=false` to keep the previous behaviour.
 - `/health` is 503 when the service is degraded. Monitors that only check for a response should accept that 503 means a problem.
+
+**New features**
+
+- **Asynchronous jobs:** `POST /jobs` returns a job id at once and the transcription continues on the server, so a client timeout or a dropped connection no longer loses the work. `GET /jobs/{id}` reports status and progress, `GET /jobs/{id}/result` returns the transcription in any of the output formats, and `DELETE /jobs/{id}` cancels a job or drops a finished transcript. Job state is kept beside the decoded audio, so jobs that were in flight when the service restarted are reported as `interrupted` instead of disappearing. See "Asynchronous Jobs".
+- **Identical submits are not run twice:** a submit matching a job that is queued, running or finished returns that job id with `deduplicated` set. Matching is on the uploaded bytes and the transcription parameters, or on an `Idempotency-Key` header and those parameters.
+- **A failed job reports a code:** `error` carries `code`, `message` and `retryable`, so a client can tell `audio_too_long` from `out_of_memory`.
+- **Capability advertisement:** `/health` and `/` report a `capabilities` object, so a client can use the job API where it exists and the synchronous endpoints elsewhere.
 
 **Fixes**
 
@@ -1382,6 +1526,7 @@ For issues and questions:
 
 **New settings**
 
+- Asynchronous jobs: `ASYNC_JOBS_ENABLED` (default `true`), `MAX_ASYNC_JOBS` (default 16), `JOB_RESULT_TTL_SECONDS` (default `JOB_TTL_SECONDS`).
 - Admission control: `MAX_AUDIO_SECONDS`, `MAX_INFLIGHT_AUDIO_SECONDS`, `MAX_QUEUED_AUDIO_SECONDS`, `MAX_QUEUED_REQUESTS`, `QUEUE_WAIT_TIMEOUT_SECONDS` (all off by default).
 - Job files: `JOB_DIR`, `JOB_TTL_SECONDS`.
 - Health and watchdog: `HEALTH_MIN_SHM_FREE_PCT`, `HEALTH_MIN_DISK_FREE_MB`, `HEALTH_STAGE_TIMEOUT_SECONDS`, `WATCHDOG_ENABLED`, `WATCHDOG_INTERVAL_SECONDS`, `WATCHDOG_FAILURES`, `WATCHDOG_TIMEOUT_SECONDS`, `WATCHDOG_SHM_MAX_USED_PCT`, `WATCHDOG_SHM_FAILURES`.

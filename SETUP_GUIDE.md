@@ -312,6 +312,16 @@ docker compose restart
 
 ## Configuration
 
+### Asynchronous Jobs
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ASYNC_JOBS_ENABLED` | `true` | Offer `POST /jobs` and the rest of the job API |
+| `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit); further submits answer 503 |
+| `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
+
+A job waits for room in the pipeline without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog. Synchronous requests keep the admission queue bounds. Finished results are held under `JOB_DIR` and removed with the job directory when the TTL passes, so `JOB_DIR` needs room for the transcripts that are kept.
+
 ### Performance Tuning
 
 Edit `.env` on the WhisperX service:
@@ -435,6 +445,20 @@ curl -X POST http://localhost:9000/asr \
   -F "min_speakers=2" \
   -F "max_speakers=4"
 ```
+
+### Step 3.5: Test an Asynchronous Job
+
+A submit returns a job id and the transcription continues on the server, which suits recordings longer than a client's timeout.
+
+```bash
+JOB=$(curl -s -X POST "http://localhost:9000/jobs?diarize=false" \
+  -F "audio_file=@test.mp3" | python3 -c "import json,sys; print(json.load(sys.stdin)['job_id'])")
+
+curl -s "http://localhost:9000/jobs/$JOB" | python3 -m json.tool
+curl -s "http://localhost:9000/jobs/$JOB/result" | python3 -m json.tool | head -20
+```
+
+The status answer carries `status`, `progress` and `error`. The result answers 202 while the job is unfinished. Set `ASYNC_JOBS_ENABLED=false` to turn the API off.
 
 ### Step 4: Test from Speakr
 
