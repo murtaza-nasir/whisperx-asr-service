@@ -42,6 +42,10 @@ from app import metrics as prom_metrics
 from app.admission import get_controller, AdmissionRejected, AudioTooLong
 from app.audio_io import UploadTooLarge, load_pcm
 from app.request_flow import admitted_job, busy_response, too_large_response
+from app.security import MAX_PROMPT_CHARS, ALLOW_LOCAL_MODEL_PATHS, sanitize_filename
+import app.security as _security
+sanitize_file_name = sanitize_filename
+sanitize_upload_filename = sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -198,10 +202,17 @@ async def process_audio(
         # Validate model: every name /v1/models lists is accepted. The field
         # stays required, as in the OpenAI API; an empty value uses the
         # server's default model.
+        _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
         try:
-            whisperx_model = resolve_model_name(model)
+            whisperx_model = resolve_model_name(model, allow_local_paths=_allow_local)
         except InvalidModelError as e:
             return create_openai_error(400, str(e), param="model")
+
+        # Validate prompt/hotwords length.
+        if prompt is not None and len(prompt) > MAX_PROMPT_CHARS:
+            return create_openai_error(400, f"prompt exceeds {MAX_PROMPT_CHARS} characters", param="prompt")
+        if hotwords is not None and len(hotwords) > MAX_PROMPT_CHARS:
+            return create_openai_error(400, f"hotwords exceeds {MAX_PROMPT_CHARS} characters", param="hotwords")
 
         # Validate timestamp_granularities requires verbose_json
         if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
@@ -218,6 +229,7 @@ async def process_audio(
                 "temperature must be between 0 and 1",
                 param="temperature"
             )
+
 
         need_word_timestamps = (
             response_format == ResponseFormat.VERBOSE_JSON and
@@ -297,10 +309,10 @@ async def process_audio(
         return busy_response(e, openai=True)
 
     except Exception as e:
-        logger.error(f"OpenAI-compat error: {str(e)}", exc_info=True)
+        logger.exception("OpenAI-compat error: %s", e)
         return create_openai_error(
             500,
-            f"Internal server error: {str(e)}",
+            "Internal server error",
             error_type="server_error"
         )
 

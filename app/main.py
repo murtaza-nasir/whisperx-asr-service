@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse, Response
 
 from app.version import __version__
 from app.pipeline import (
-    _env_int,
     DEVICE,
     COMPUTE_TYPE,
     BATCH_SIZE,
@@ -55,6 +54,15 @@ from app.request_flow import (
     MaxUploadSizeMiddleware,
     startup_sweep,
 )
+from app.security import (
+    SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, MAX_PROMPT_CHARS,
+    ALLOW_LOCAL_MODEL_PATHS, sanitize_filename, stream_upload_to_temp,
+)
+import app.security as _security
+# Re-export security helpers for tests that import them from this module.
+sanitize_file_name = sanitize_filename
+sanitize_upload_filename = sanitize_filename
+stream_upload = stream_upload_to_temp
 
 # Suppress pyannote pooling warnings about degrees of freedom
 warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
@@ -69,7 +77,6 @@ logging.basicConfig(
 logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 SERVE_MODE = os.getenv("SERVE_MODE", "simple")
 
 
@@ -97,6 +104,9 @@ app = FastAPI(
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 app.add_middleware(MaxUploadSizeMiddleware, max_file_size_mb=MAX_FILE_SIZE_MB)
 
@@ -139,6 +149,21 @@ def get_jobs() -> JobManager:
     if _jobs is None:
         _jobs = JobManager(get_controller(), _execute_job)
     return _jobs
+
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
+app.add_middleware(SecurityMiddleware)
+
+
+@app.exception_handler(Exception)
+async def _generic_exception_handler(request, exc):
+    import logging
+    logging.getLogger(__name__).exception("Unhandled exception: %s", exc)
+    if str(request.url.path).startswith("/v1/audio/"):
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "server_error"}},
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
@@ -204,12 +229,25 @@ async def transcribe_audio(
         if output is not None:
             output_format = output
 
+        # Validate prompt lengths.
+        if initial_prompt is not None and len(initial_prompt) > MAX_PROMPT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"initial_prompt exceeds {MAX_PROMPT_CHARS} characters",
+            )
+        if hotwords is not None and len(hotwords) > MAX_PROMPT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"hotwords exceeds {MAX_PROMPT_CHARS} characters",
+            )
+
         # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
         # to canonical faster-whisper names so /asr accepts the same identifiers
         # advertised by /v1/models. No model means the default model; an
         # unknown one is a client error.
+        _allow_local = ALLOW_LOCAL_MODEL_PATHS or getattr(_security, "ALLOW_LOCAL_MODEL_PATHS", False)
         try:
-            model = resolve_model_name(model)
+            model = resolve_model_name(model, allow_local_paths=_allow_local)
         except InvalidModelError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -227,7 +265,7 @@ async def transcribe_audio(
             if job.size_mb > 100:
                 logger.warning(f"Processing large file ({job.size_mb:.1f}MB) - may consume significant VRAM")
             logger.info(
-                f"Processing audio file: {audio_file.filename} ({job.size_mb:.1f}MB, "
+                f"Processing audio file: {sanitize_filename(audio_file.filename)} ({job.size_mb:.1f}MB, "
                 f"{job.duration:.0f}s), model: {model}, language: {language}"
             )
 
@@ -340,8 +378,8 @@ async def transcribe_audio(
         logger.error(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        logger.error(f"Transcription error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Transcription error: %s", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     finally:
         prom_metrics.ACTIVE_TRANSCRIPTIONS.dec()
