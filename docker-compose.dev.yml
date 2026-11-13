@@ -81,6 +81,8 @@ services:
       # Idle model eviction (0 disables; see README)
       - MODEL_KEEP_ALIVE_SECONDS=${MODEL_KEEP_ALIVE_SECONDS:-0}
       - MODEL_EVICTION_INTERVAL_SECONDS=${MODEL_EVICTION_INTERVAL_SECONDS:-60}
+      # false skips the GPU cache cleanup after each transcription (lower latency)
+      - CLEAR_GPU_AFTER_TRANSCRIBE=${CLEAR_GPU_AFTER_TRANSCRIBE:-true}
       - SERVE_MODE=${SERVE_MODE:-simple}
       - RAY_DASHBOARD_HOST=${RAY_DASHBOARD_HOST:-127.0.0.1}
       - PIPELINE_STRATEGY=${PIPELINE_STRATEGY:-replicate}
