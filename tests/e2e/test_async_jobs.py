@@ -74,6 +74,15 @@ def _stop(proc):
 
 @pytest.fixture(scope="module")
 def server():
+    """The job API with the listing on, so the tests can read /jobs."""
+    proc, url = _start(overrides=["JOBS_LIST_ENABLED=true"])
+    yield url
+    _stop(proc)
+
+
+@pytest.fixture(scope="module")
+def default_server():
+    """Defaults as shipped: jobs on, the listing off."""
     proc, url = _start()
     yield url
     _stop(proc)
@@ -82,7 +91,7 @@ def server():
 @pytest.fixture(scope="module")
 def short_limit_server():
     """A server that refuses anything longer than one second."""
-    proc, url = _start(overrides=["MAX_AUDIO_SECONDS=1"])
+    proc, url = _start(overrides=["MAX_AUDIO_SECONDS=1", "JOBS_LIST_ENABLED=true"])
     yield url
     _stop(proc)
 
@@ -291,6 +300,25 @@ def test_the_limit_is_reported_before_any_work(short_limit_server):
     submit(short_limit_server, audio=_wav(4.0))
     after = httpx.get(short_limit_server + "/jobs", timeout=10).json()["counts"]["total"]
     assert after == before
+
+
+def test_the_listing_is_off_by_default(default_server):
+    """A listing would make job ids enumerable, so it needs the setting."""
+    job_id = submit(default_server).json()["job_id"]
+    assert httpx.get(default_server + "/jobs", timeout=10).status_code == 404
+    caps = httpx.get(default_server + "/health", timeout=10).json()["capabilities"]
+    assert caps["async_jobs"] is True
+    assert caps["list_jobs"] is False
+    # The job itself is still reachable by its id, and the counts have no ids.
+    assert httpx.get(f"{default_server}/jobs/{job_id}", timeout=10).status_code == 200
+    counts = httpx.get(default_server + "/health", timeout=10).json()["jobs"]
+    assert set(counts) == {"total", "active", "queued", "running"}
+    wait_for(default_server, job_id)
+
+
+def test_the_listing_reports_the_capability_when_on(server):
+    caps = httpx.get(server + "/health", timeout=10).json()["capabilities"]
+    assert caps["list_jobs"] is True
 
 
 def test_the_surface_can_be_turned_off(no_jobs_server):

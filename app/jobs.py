@@ -115,6 +115,17 @@ def max_async_jobs() -> int:
     return max(0, _env_int("MAX_ASYNC_JOBS", 16))
 
 
+def jobs_list_enabled() -> bool:
+    """Whether GET /jobs may list job ids.
+
+    Off by default. The service has no inbound authentication, so a job id is
+    the only gate on its transcript, and a listing turns an unguessable id
+    into an enumerable one. The counts in /health carry no ids and stay
+    available either way.
+    """
+    return _env_flag("JOBS_LIST_ENABLED", False)
+
+
 def result_ttl_seconds() -> int:
     """How long a finished job stays fetchable. Defaults to the job TTL so
     one setting still governs everything in JOB_DIR."""
@@ -131,6 +142,7 @@ def capabilities() -> dict:
         "idempotency_key": enabled,
         "progress": enabled,
         "cancel": enabled,
+        "list_jobs": enabled and jobs_list_enabled(),
         "job_result_ttl_seconds": result_ttl_seconds() if enabled else None,
         "max_async_jobs": max_async_jobs() if enabled else None,
     }
@@ -598,7 +610,8 @@ __all__ = [
     "Job", "JobStore", "JobNotFound", "TooManyJobs",
     "QUEUED", "RUNNING", "DONE", "ERROR", "CANCELLED", "INTERRUPTED",
     "ACTIVE_STATUSES", "TERMINAL_STATUSES", "JOBS_API_VERSION",
-    "async_jobs_enabled", "max_async_jobs", "result_ttl_seconds", "capabilities",
+    "async_jobs_enabled", "max_async_jobs", "jobs_list_enabled",
+    "result_ttl_seconds", "capabilities",
     "error_object", "hash_file", "params_key", "dedupe_key", "new_job_id",
     "get_store", "reset_store",
 ]

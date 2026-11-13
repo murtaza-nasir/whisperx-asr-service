@@ -319,6 +319,7 @@ docker compose restart
 | `ASYNC_JOBS_ENABLED` | `true` | Offer `POST /jobs` and the rest of the job API |
 | `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit); further submits answer 503 |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
+| `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids; the counts in `/health` carry no ids |
 
 A job waits for room in the pipeline without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog. Synchronous requests keep the admission queue bounds.
 

@@ -65,6 +65,7 @@ Generate a read token at https://huggingface.co/settings/tokens and pass it as `
 | `GET /v1/models` | List available models |
 | `POST /jobs` | Submit a transcription and receive a job id |
 | `GET /jobs/{id}` | Job status and progress |
+| `GET /jobs` | List jobs (off unless `JOBS_LIST_ENABLED`) |
 | `GET /jobs/{id}/result` | Finished transcription, in any output format |
 | `DELETE /jobs/{id}` | Cancel a job or drop a finished transcript |
 | `GET /health` | Health probe |
@@ -92,6 +93,7 @@ Common environment variables. Full reference is in the GitHub README.
 | `ASYNC_JOBS_ENABLED` | `true` | Offer the `/jobs` API |
 | `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit) |
 | `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
+| `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids |
 
 A submit to `/jobs` answers with a job id while the transcription continues on the server, which suits recordings that take longer than a client is willing to wait. Identical submits attach to the job already in progress. The service has no authentication, so a job id is the only gate on its transcript.
 

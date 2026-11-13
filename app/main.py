@@ -436,8 +436,12 @@ async def submit_job(
 
 @app.get("/jobs")
 async def list_jobs(limit: int = Query(50, ge=1, le=500)):
-    """Jobs this process knows about, newest first."""
-    if not jobs_mod.async_jobs_enabled():
+    """Jobs this process knows about, newest first.
+
+    Off unless JOBS_LIST_ENABLED is set: a listing would make job ids
+    enumerable, and an id is the only gate on its transcript.
+    """
+    if not jobs_mod.async_jobs_enabled() or not jobs_mod.jobs_list_enabled():
         return disabled_response()
     manager = get_jobs()
     manager.store.forget_expired()

@@ -19,7 +19,8 @@ def run(coro):
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
-    for key in ("ASYNC_JOBS_ENABLED", "MAX_ASYNC_JOBS", "JOB_RESULT_TTL_SECONDS"):
+    for key in ("ASYNC_JOBS_ENABLED", "MAX_ASYNC_JOBS", "JOB_RESULT_TTL_SECONDS",
+                "JOBS_LIST_ENABLED"):
         monkeypatch.delenv(key, raising=False)
     jobs_mod.reset_store()
     yield
@@ -50,6 +51,23 @@ def test_async_jobs_are_on_by_default():
     assert caps["dedupe"] is True and caps["idempotency_key"] is True
     assert caps["cancel"] is True and caps["progress"] is True
     assert caps["job_result_ttl_seconds"] > 0
+
+
+def test_the_listing_is_off_by_default():
+    assert jobs_mod.jobs_list_enabled() is False
+    assert jobs_mod.capabilities()["list_jobs"] is False
+
+
+def test_the_listing_can_be_turned_on(monkeypatch):
+    monkeypatch.setenv("JOBS_LIST_ENABLED", "true")
+    assert jobs_mod.jobs_list_enabled() is True
+    assert jobs_mod.capabilities()["list_jobs"] is True
+
+
+def test_the_listing_follows_the_job_api(monkeypatch):
+    monkeypatch.setenv("JOBS_LIST_ENABLED", "true")
+    monkeypatch.setenv("ASYNC_JOBS_ENABLED", "false")
+    assert jobs_mod.capabilities()["list_jobs"] is False
 
 
 def test_the_surface_can_be_turned_off(monkeypatch):

@@ -65,6 +65,7 @@ services:
       # Asynchronous jobs (POST /jobs; see README "Asynchronous Jobs")
       - ASYNC_JOBS_ENABLED=${ASYNC_JOBS_ENABLED:-true}
       - MAX_ASYNC_JOBS=${MAX_ASYNC_JOBS:-16}
+      - JOBS_LIST_ENABLED=${JOBS_LIST_ENABLED:-false}
       - JOB_RESULT_TTL_SECONDS=${JOB_RESULT_TTL_SECONDS:-86400}
       # Health checks and the watchdog that restarts an unhealthy container
       - HEALTH_MIN_SHM_FREE_PCT=${HEALTH_MIN_SHM_FREE_PCT:-5}

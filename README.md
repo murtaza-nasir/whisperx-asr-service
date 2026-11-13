@@ -355,7 +355,7 @@ A submit returns a job id at once and the transcription continues on the server,
 | `GET /jobs/{job_id}` | Status and progress. |
 | `GET /jobs/{job_id}/result` | The finished transcription, in the requested format. |
 | `DELETE /jobs/{job_id}` | Cancel a job, or drop a finished transcript. |
-| `GET /jobs` | The jobs this process knows about, newest first. |
+| `GET /jobs` | The jobs this process knows about, newest first. Off unless `JOBS_LIST_ENABLED` is set. |
 
 `POST /jobs` takes the same file field and the same parameters as `/asr`, apart from `output_format`. The raw result is stored and formatted when it is fetched, so one job serves every format.
 
@@ -458,6 +458,7 @@ A queued job is dropped, and for a running job the stage call is cancelled, whic
 | `ASYNC_JOBS_ENABLED` | `true` | When false, every `/jobs` path answers 404 and the capability is advertised as absent. |
 | `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit). Further submits are refused with 503. |
 | `JOB_RESULT_TTL_SECONDS` | `JOB_TTL_SECONDS` (86400) | How long a finished result stays fetchable. |
+| `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids. A listing makes the ids enumerable, and an id is the only gate on its transcript. The counts in `/health` carry no ids and are unaffected. |
 
 Admission control still governs the pipeline: a job waits for `MAX_INFLIGHT_AUDIO_SECONDS` without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog instead. Synchronous requests keep the queue bounds and `QUEUE_WAIT_TIMEOUT_SECONDS`.
 
@@ -470,7 +471,8 @@ Admission control still governs the pipeline: a job waits for `MAX_INFLIGHT_AUDI
 ```json
 {"capabilities": {"async_jobs": true, "jobs_api_version": 1, "dedupe": true,
                   "idempotency_key": true, "progress": true, "cancel": true,
-                  "job_result_ttl_seconds": 86400, "max_async_jobs": 16}}
+                  "list_jobs": false, "job_result_ttl_seconds": 86400,
+                  "max_async_jobs": 16}}
 ```
 
 `/health` also reports `jobs` with the counts of jobs known, active, queued and running. Queue state for deciding whether to submit is in the existing `admission` block.
@@ -1395,7 +1397,7 @@ If exposing to a network:
 - Consider putting behind a reverse proxy
 - Store HF_TOKEN securely (use `.env` file, not hardcoded)
 
-Because there is no authentication, a job id is the only thing standing between a request and the transcript it belongs to. Ids are 128 random bits, and `GET /jobs` lists the ids this process knows about. Set `ASYNC_JOBS_ENABLED=false` where that listing is not acceptable, and put the service behind a proxy that authenticates.
+Because there is no authentication, a job id is the only thing standing between a request and the transcript it belongs to. Ids are 128 random bits. `GET /jobs` would make them enumerable, so that listing is off unless `JOBS_LIST_ENABLED` is set; the job counts in `/health` carry no ids. Set `ASYNC_JOBS_ENABLED=false` to remove the API altogether, and put the service behind a proxy that authenticates.
 
 ## Maintenance
 
@@ -1501,7 +1503,7 @@ For issues and questions:
 - No configuration changes are required. The new limits are off by default, and responses for admitted requests are unchanged except for the new `diarization` field and `X-Diarization-Status` header when diarization is requested.
 - The asynchronous job API is new and is on by default. The existing endpoints are unchanged, so a client that does not use `/jobs` is unaffected. Set `ASYNC_JOBS_ENABLED=false` to leave the paths answering 404.
 - `/health` and `/` gained a `capabilities` object, and `/health` gained `jobs` counts. Both are additions; every field earlier versions answered with is still present.
-- Because the service has no authentication, a job id is the only gate on the transcript it belongs to, and `GET /jobs` lists the ids this process knows about. See "Security Notes".
+- Because the service has no authentication, a job id is the only gate on the transcript it belongs to. `GET /jobs` would make the ids enumerable, so it answers 404 unless `JOBS_LIST_ENABLED=true`. See "Security Notes".
 - Compose files from earlier releases: to use the new Ray Serve memory layout, add the `tmpfs` entry for `/ray-tmp` from the current `docker-compose.yml`. Without it, Ray's session files and logs are on the container's disk.
 - The container now exits after sustained failed health checks so that the restart policy can start a fresh one. Set `WATCHDOG_ENABLED=false` to keep the previous behaviour.
 - `/health` is 503 when the service is degraded. Monitors that only check for a response should accept that 503 means a problem.
