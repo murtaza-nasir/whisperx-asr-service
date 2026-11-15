@@ -156,6 +156,23 @@ def test_the_job_finishes_and_the_result_matches_the_sync_endpoint(server):
     assert r.json() == sync.json()
 
 
+def test_a_job_with_speaker_embeddings_matches_the_sync_endpoint(server):
+    audio = _wav(2.0)
+    params = {"output": "json", "diarize": "true", "return_speaker_embeddings": "true",
+              "min_speakers": "1", "max_speakers": "1"}
+    sync = httpx.post(server + "/asr", params=params,
+                      files={"audio_file": ("a.wav", audio, "audio/wav")}, timeout=60)
+    assert sync.status_code == 200, sync.text
+    assert sync.json()["speaker_embeddings"]
+
+    job_id = submit(server, audio=audio, params=params).json()["job_id"]
+    body = wait_for(server, job_id)
+    assert body["status"] == "done", body
+    r = httpx.get(f"{server}/jobs/{job_id}/result", params={"output": "json"}, timeout=30)
+    assert r.status_code == 200, r.text
+    assert r.json() == sync.json()
+
+
 def test_progress_reaches_one_and_says_it_is_no_longer_an_estimate(server):
     job_id = submit(server).json()["job_id"]
     body = wait_for(server, job_id)

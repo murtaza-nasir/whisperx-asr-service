@@ -202,7 +202,11 @@ class JobManager:
                 result, embeddings, extras = await self._execute(
                     pcm_path, job.params, lambda stage: job.enter_stage(stage)
                 )
-                payload = {"result": result, "speaker_embeddings": embeddings}
+                from app.pipeline import sanitize_float_values
+                # The result is stored as JSON: arrays become lists and
+                # non-finite numbers are replaced, as in the /asr response.
+                payload = {"result": result,
+                           "speaker_embeddings": sanitize_float_values(embeddings)}
                 payload.update(extras or {})
                 job.finish(payload)
                 logger.info(f"Job {job.id} done in "
