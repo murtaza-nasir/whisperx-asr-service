@@ -95,7 +95,7 @@ Common environment variables. Full reference is in the GitHub README.
 | `JOB_RESULT_TTL_SECONDS` | `86400` | How long a finished job's result stays fetchable |
 | `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids |
 
-A submit to `/jobs` answers with a job id while the transcription continues on the server, which suits recordings that take longer than a client is willing to wait. Identical submits attach to the job already in progress. The service has no authentication, so a job id is the only gate on its transcript.
+A submit to `/jobs` answers with a job id while the transcription continues on the server, which suits recordings that take longer than a client is willing to wait. Identical submits attach to the job already in progress. Authentication is optional and off by default: with `API_KEY` set, the `/jobs` routes need the key too. Without it, a job id is the only gate on its transcript.
 
 For multi-GPU, Ray Serve, pipeline strategies, hotwords, OpenAI-compatible parameters, offline use, and the full Prometheus metrics catalogue, see the [GitHub README](https://github.com/murtaza-nasir/whisperx-asr-service#readme).
 

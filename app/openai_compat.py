@@ -42,6 +42,7 @@ from app import metrics as prom_metrics
 from app.admission import get_controller, AdmissionRejected, AudioTooLong
 from app.audio_io import UploadTooLarge, load_pcm
 from app.request_flow import admitted_job, busy_response, too_large_response
+from app.security import MAX_PROMPT_CHARS, local_model_paths_allowed, prompt_too_long
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +200,15 @@ async def process_audio(
         # stays required, as in the OpenAI API; an empty value uses the
         # server's default model.
         try:
-            whisperx_model = resolve_model_name(model)
+            whisperx_model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
         except InvalidModelError as e:
             return create_openai_error(400, str(e), param="model")
+
+        # Validate prompt/hotwords length.
+        if prompt_too_long(prompt):
+            return create_openai_error(400, f"prompt exceeds {MAX_PROMPT_CHARS} characters", param="prompt")
+        if prompt_too_long(hotwords):
+            return create_openai_error(400, f"hotwords exceeds {MAX_PROMPT_CHARS} characters", param="hotwords")
 
         # Validate timestamp_granularities requires verbose_json
         if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
@@ -296,11 +303,11 @@ async def process_audio(
         prom_metrics.ADMISSION_REJECTIONS.labels(reason=e.reason).inc()
         return busy_response(e, openai=True)
 
-    except Exception as e:
-        logger.error(f"OpenAI-compat error: {str(e)}", exc_info=True)
+    except Exception:
+        logger.exception("OpenAI-compat error")
         return create_openai_error(
             500,
-            f"Internal server error: {str(e)}",
+            "Internal server error",
             error_type="server_error"
         )
 

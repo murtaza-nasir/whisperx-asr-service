@@ -31,7 +31,7 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 
 ## Limitations
 
-- **Not production-grade**: Basic error handling, no authentication
+- **Not production-grade**: Basic error handling; API key authentication is optional and off by default (see "Security Notes")
 - **GPU required**: Needs an NVIDIA GPU; ~5GB VRAM covers the large models
 - **File size limits**: Large audio files (>1GB) can cause out-of-memory errors
 - **VRAM usage**: Memory consumption increases with file size and diarization
@@ -458,7 +458,7 @@ A queued job is dropped, and for a running job the stage call is cancelled, whic
 | `ASYNC_JOBS_ENABLED` | `true` | When false, every `/jobs` path answers 404 and the capability is advertised as absent. |
 | `MAX_ASYNC_JOBS` | `16` | Jobs queued or running at once (`0` for no limit). Further submits are refused with 503. |
 | `JOB_RESULT_TTL_SECONDS` | `JOB_TTL_SECONDS` (86400) | How long a finished result stays fetchable. |
-| `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids. A listing makes the ids enumerable, and an id is the only gate on its transcript. The counts in `/health` carry no ids and are unaffected. |
+| `JOBS_LIST_ENABLED` | `false` | Whether `GET /jobs` lists job ids. A listing makes the ids enumerable, and without `API_KEY` an id is the only gate on its transcript. The counts in `/health` carry no ids and are unaffected. |
 
 Admission control still governs the pipeline: a job waits for `MAX_INFLIGHT_AUDIO_SECONDS` without a deadline, because `MAX_ASYNC_JOBS` bounds the backlog instead. Synchronous requests keep the queue bounds and `QUEUE_WAIT_TIMEOUT_SECONDS`.
 
@@ -696,6 +696,11 @@ MAX_FILE_SIZE_MB=1000
 # ASYNC_JOBS_ENABLED=true
 # MAX_ASYNC_JOBS=16
 # JOB_RESULT_TTL_SECONDS=86400
+
+# Security (optional, off by default): API_KEY, API_KEYS, RATE_LIMIT_REQUESTS,
+# RATE_LIMIT_WINDOW_SECONDS, ALLOWED_ORIGINS, MAX_PROMPT_CHARS,
+# ALLOW_LOCAL_MODEL_PATHS, ENABLE_DOCS, TRUST_PROXY. See "Security Notes".
+# API_KEY=
 
 # Idle model eviction (default disabled). When > 0, Whisper models that have
 # not served a request in this many seconds are unloaded from memory by a
@@ -1390,14 +1395,16 @@ The service supports formats that WhisperX can process (via FFmpeg):
 
 ## Security Notes
 
-**This service has NO built-in authentication or security features.**
+The security controls are optional and off by default: API key authentication (`API_KEY`, `API_KEYS`), per-IP rate limiting on the transcription endpoints, a CORS allowlist (`ALLOWED_ORIGINS`), limits on prompt length, and the option to hide `/docs`. Security headers are sent on every response. The variables are listed in the "Security" section of `.env.example`.
+
+With `API_KEY` set, `POST /asr`, `POST /v1/audio/transcriptions`, `POST /v1/audio/translations`, the `/jobs` routes, `GET /metrics` and `GET /queue-metrics` require `Authorization: Bearer <key>` or `X-API-Key: <key>`. `/health` and `/v1/models` are not covered. `POST /jobs` counts toward `RATE_LIMIT_REQUESTS`, like the other transcription endpoints.
 
 If exposing to a network:
 - Use firewall rules to restrict access
-- Consider putting behind a reverse proxy
+- Put the service behind a reverse proxy that terminates TLS (the service itself does not serve HTTPS)
 - Store HF_TOKEN securely (use `.env` file, not hardcoded)
 
-Because there is no authentication, a job id is the only thing standing between a request and the transcript it belongs to. Ids are 128 random bits. `GET /jobs` would make them enumerable, so that listing is off unless `JOBS_LIST_ENABLED` is set; the job counts in `/health` carry no ids. Set `ASYNC_JOBS_ENABLED=false` to remove the API altogether, and put the service behind a proxy that authenticates.
+For the `/jobs` routes, when `API_KEY` is not set a job id is the only thing standing between a request and the transcript it belongs to. Ids are 128 random bits. `GET /jobs` would make them enumerable, so that listing is off unless `JOBS_LIST_ENABLED` is set; the job counts in `/health` carry no ids. Set `ASYNC_JOBS_ENABLED=false` to remove the API altogether.
 
 ## Maintenance
 
@@ -1503,7 +1510,7 @@ For issues and questions:
 - No configuration changes are required. The new limits are off by default, and responses for admitted requests are unchanged except for the new `diarization` field and `X-Diarization-Status` header when diarization is requested.
 - The asynchronous job API is new and is on by default. The existing endpoints are unchanged, so a client that does not use `/jobs` is unaffected. Set `ASYNC_JOBS_ENABLED=false` to leave the paths answering 404.
 - `/health` and `/` gained a `capabilities` object, and `/health` gained `jobs` counts. Both are additions; every field earlier versions answered with is still present.
-- Because the service has no authentication, a job id is the only gate on the transcript it belongs to. `GET /jobs` would make the ids enumerable, so it answers 404 unless `JOBS_LIST_ENABLED=true`. See "Security Notes".
+- The `/jobs` routes are covered by `API_KEY` when it is set. Without it, a job id is the only gate on the transcript it belongs to. `GET /jobs` would make the ids enumerable, so it answers 404 unless `JOBS_LIST_ENABLED=true`. See "Security Notes".
 - Compose files from earlier releases: to use the new Ray Serve memory layout, add the `tmpfs` entry for `/ray-tmp` from the current `docker-compose.yml`. Without it, Ray's session files and logs are on the container's disk.
 - The container now exits after sustained failed health checks so that the restart policy can start a fresh one. Set `WATCHDOG_ENABLED=false` to keep the previous behaviour.
 - `/health` is 503 when the service is degraded. Monitors that only check for a response should accept that 503 means a problem.

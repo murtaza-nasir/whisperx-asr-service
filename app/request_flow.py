@@ -86,6 +86,17 @@ def too_large_response(exc: Exception, openai: bool = False, code: str = "file_t
     return JSONResponse(status_code=413, content=content)
 
 
+async def unhandled_exception_handler(request, exc):
+    """Log the traceback and answer 500 without the exception text."""
+    logger.exception("Unhandled exception: %s", exc)
+    if str(request.url.path).startswith("/v1/audio/"):
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "Internal server error", "type": "server_error"}},
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
 def diarization_fields(result: dict):
     """Pop the internal diarization status from a pipeline result.
     Returns (response_field_or_None, header_value_or_None)."""
@@ -142,6 +153,6 @@ def startup_sweep() -> None:
 
 __all__ = [
     "admitted_job", "busy_response", "unavailable_response", "too_large_response",
-    "diarization_fields", "MaxUploadSizeMiddleware", "startup_sweep",
+    "unhandled_exception_handler", "diarization_fields", "MaxUploadSizeMiddleware", "startup_sweep",
     "UploadTooLarge", "AudioTooLong", "AdmissionRejected", "AudioDecodeError",
 ]

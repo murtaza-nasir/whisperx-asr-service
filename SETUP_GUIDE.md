@@ -643,7 +643,7 @@ docker compose logs --tail=10
 
 ## Security Notes
 
-**This service has NO authentication or security features.**
+Authentication, rate limiting and CORS are optional and off by default. Set `API_KEY` in `.env` to require an API key on the transcription endpoints, the `/jobs` routes and `/metrics`; the variables are described in the "Security" section of `.env.example`. `POST /jobs` counts toward `RATE_LIMIT_REQUESTS`, like the other transcription endpoints.
 
 Basic protection:
 ```bash
@@ -654,7 +654,7 @@ sudo ufw deny 9000/tcp
 # Store HF_TOKEN in .env file, not hardcoded
 ```
 
-For internet exposure, you'll need to add your own reverse proxy and authentication.
+For internet exposure, put a reverse proxy with TLS in front of the service. The service does not serve HTTPS itself.
 
 ---
 

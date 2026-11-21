@@ -27,6 +27,10 @@ import ray.serve.exceptions
 from ray import serve
 
 from app.version import __version__
+from app.security import (
+    SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, MAX_PROMPT_CHARS,
+    sanitize_filename, check_prompt_lengths, local_model_paths_allowed, prompt_too_long,
+)
 from app.pipeline import (
     DEVICE,
     COMPUTE_TYPE,
@@ -39,7 +43,6 @@ from app.pipeline import (
     list_available_models,
     describe_model_settings,
     DiarizationError,
-    _env_int,
     _whisper_models as loaded_models,
 )
 from app import metrics as prom_metrics
@@ -63,6 +66,7 @@ from app.request_flow import (
     diarization_fields,
     MaxUploadSizeMiddleware,
     startup_sweep,
+    unhandled_exception_handler,
 )
 from app.schemas import (
     ResponseFormat,
@@ -89,8 +93,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 
 def _error_types(module, names):
     return [t for t in (getattr(module, n, None) for n in names) if isinstance(t, type)]
@@ -147,8 +149,18 @@ fastapi_app = FastAPI(
     title="WhisperX ASR API (Ray Serve)",
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 fastapi_app.add_middleware(MaxUploadSizeMiddleware, max_file_size_mb=MAX_FILE_SIZE_MB)
+
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
+# Rate limiting is per ingress process in Ray Serve mode.
+fastapi_app.add_middleware(SecurityMiddleware)
+
+
+fastapi_app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
 @serve.deployment(
@@ -340,8 +352,9 @@ class ASRIngress:
         request_started = time.time()
         if not jobs_mod.async_jobs_enabled():
             return disabled_response()
+        check_prompt_lengths(initial_prompt, hotwords)
         try:
-            model = resolve_model_name(model)
+            model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
         except InvalidModelError as e:
             raise HTTPException(status_code=400, detail=str(e))
         if diarize is not None or enable_diarization is not None:
@@ -592,12 +605,14 @@ class ASRIngress:
             if output is not None:
                 output_format = output
 
+            check_prompt_lengths(initial_prompt, hotwords)
+
             # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
             # to canonical faster-whisper names so /asr accepts the same identifiers
             # advertised by /v1/models. No model means the default model; an
             # unknown one is a client error.
             try:
-                model = resolve_model_name(model)
+                model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
             except InvalidModelError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
@@ -612,7 +627,7 @@ class ASRIngress:
                 prom_metrics.AUDIO_SIZE_MB.observe(job.size_mb)
                 prom_metrics.AUDIO_DURATION.observe(job.duration)
                 logger.info(
-                    f"Processing {audio_file.filename} ({job.size_mb:.1f}MB, "
+                    f"Processing {sanitize_filename(audio_file.filename)} ({job.size_mb:.1f}MB, "
                     f"{job.duration:.0f}s), model: {model}"
                 )
                 audio = job.pcm_path
@@ -663,9 +678,9 @@ class ASRIngress:
         except DiarizationError as e:
             logger.error(f"Transcription error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-        except Exception as e:
-            logger.error(f"Transcription error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Transcription error")
+            raise HTTPException(status_code=500, detail="Internal server error")
         finally:
             prom_metrics.ACTIVE_TRANSCRIPTIONS.dec()
             prom_metrics.REQUEST_DURATION.labels(endpoint="/asr").observe(time.time() - request_started)
@@ -752,9 +767,14 @@ class ASRIngress:
     ):
         try:
             try:
-                whisperx_model = resolve_model_name(model)
+                whisperx_model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
             except InvalidModelError as e:
                 return create_openai_error(400, str(e), param="model")
+
+            if prompt_too_long(prompt):
+                return create_openai_error(400, f"prompt exceeds {MAX_PROMPT_CHARS} characters", param="prompt")
+            if prompt_too_long(hotwords):
+                return create_openai_error(400, f"hotwords exceeds {MAX_PROMPT_CHARS} characters", param="hotwords")
 
             if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
                 return create_openai_error(
@@ -888,9 +908,9 @@ class ASRIngress:
         except _UNAVAILABLE_ERRORS as e:
             logger.error(f"OpenAI-compat unavailable: {type(e).__name__}: {e}")
             return unavailable_response(f"{type(e).__name__}: {e}", openai=True)
-        except Exception as e:
-            logger.error(f"OpenAI-compat error: {e}", exc_info=True)
-            return create_openai_error(500, f"Internal server error: {e}",
+        except Exception:
+            logger.exception("OpenAI-compat error")
+            return create_openai_error(500, "Internal server error",
                                        error_type="server_error")
 
     # ------------------------------------------------------------------

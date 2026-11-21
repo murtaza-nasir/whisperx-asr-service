@@ -51,6 +51,16 @@ services:
       - ALLOWED_MODELS=${ALLOWED_MODELS:-}
       - MAX_LOADED_MODELS=${MAX_LOADED_MODELS:-}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
+      # HTTP security (all off by default; see .env.example "Security")
+      - API_KEY=${API_KEY:-}
+      - API_KEYS=${API_KEYS:-}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-0}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - MAX_PROMPT_CHARS=${MAX_PROMPT_CHARS:-4096}
+      - ALLOW_LOCAL_MODEL_PATHS=${ALLOW_LOCAL_MODEL_PATHS:-false}
+      - ENABLE_DOCS=${ENABLE_DOCS:-true}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
       # Admission control by audio length (0 = off; see README "Long Files and Overload")
       - MAX_AUDIO_SECONDS=${MAX_AUDIO_SECONDS:-0}
       - MAX_INFLIGHT_AUDIO_SECONDS=${MAX_INFLIGHT_AUDIO_SECONDS:-0}
