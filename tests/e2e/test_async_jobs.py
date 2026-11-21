@@ -43,10 +43,10 @@ def _wav(seconds=3.0, freq=440.0, rate=16000):
     return buf.getvalue()
 
 
-def _start(overrides=()):
+def _start(job_dir, overrides=()):
     port = _free_port()
     argv = [sys.executable, os.path.join(HERE, "stub_server.py"), "--env-file", MINIMAL_ENV,
-            "--port", str(port), "--timeout", "60"]
+            "--port", str(port), "--timeout", "60", "--set", f"JOB_DIR={job_dir}"]
     for item in overrides:
         argv += ["--set", item]
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -73,32 +73,32 @@ def _stop(proc):
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(tmp_path_factory):
     """The job API with the listing on, so the tests can read /jobs."""
-    proc, url = _start(overrides=["JOBS_LIST_ENABLED=true"])
+    proc, url = _start(tmp_path_factory.mktemp("jobs"), overrides=["JOBS_LIST_ENABLED=true"])
     yield url
     _stop(proc)
 
 
 @pytest.fixture(scope="module")
-def default_server():
+def default_server(tmp_path_factory):
     """Defaults as shipped: jobs on, the listing off."""
-    proc, url = _start()
+    proc, url = _start(tmp_path_factory.mktemp("jobs"))
     yield url
     _stop(proc)
 
 
 @pytest.fixture(scope="module")
-def short_limit_server():
+def short_limit_server(tmp_path_factory):
     """A server that refuses anything longer than one second."""
-    proc, url = _start(overrides=["MAX_AUDIO_SECONDS=1", "JOBS_LIST_ENABLED=true"])
+    proc, url = _start(tmp_path_factory.mktemp("jobs"), overrides=["MAX_AUDIO_SECONDS=1", "JOBS_LIST_ENABLED=true"])
     yield url
     _stop(proc)
 
 
 @pytest.fixture(scope="module")
-def no_jobs_server():
-    proc, url = _start(overrides=["ASYNC_JOBS_ENABLED=false"])
+def no_jobs_server(tmp_path_factory):
+    proc, url = _start(tmp_path_factory.mktemp("jobs"), overrides=["ASYNC_JOBS_ENABLED=false"])
     yield url
     _stop(proc)
 

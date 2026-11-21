@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse, Response
 
 from app.version import __version__
 from app.pipeline import (
-    _env_int,
     DEVICE,
     COMPUTE_TYPE,
     BATCH_SIZE,
@@ -54,6 +53,11 @@ from app.request_flow import (
     diarization_fields,
     MaxUploadSizeMiddleware,
     startup_sweep,
+    unhandled_exception_handler,
+)
+from app.security import (
+    SecurityMiddleware, ENABLE_DOCS, MAX_FILE_SIZE_MB, sanitize_filename,
+    check_prompt_lengths, local_model_paths_allowed,
 )
 
 # Suppress pyannote pooling warnings about degrees of freedom
@@ -69,7 +73,6 @@ logging.basicConfig(
 logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 SERVE_MODE = os.getenv("SERVE_MODE", "simple")
 
 
@@ -97,6 +100,9 @@ app = FastAPI(
     description="Automatic Speech Recognition API with Speaker Diarization using WhisperX",
     version=__version__,
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 app.add_middleware(MaxUploadSizeMiddleware, max_file_size_mb=MAX_FILE_SIZE_MB)
 
@@ -139,6 +145,10 @@ def get_jobs() -> JobManager:
     if _jobs is None:
         _jobs = JobManager(get_controller(), _execute_job)
     return _jobs
+
+# Shared HTTP security boundary (auth, rate limiting, CORS, headers).
+app.add_middleware(SecurityMiddleware)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
@@ -204,12 +214,14 @@ async def transcribe_audio(
         if output is not None:
             output_format = output
 
+        check_prompt_lengths(initial_prompt, hotwords)
+
         # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
         # to canonical faster-whisper names so /asr accepts the same identifiers
         # advertised by /v1/models. No model means the default model; an
         # unknown one is a client error.
         try:
-            model = resolve_model_name(model)
+            model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
         except InvalidModelError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -227,7 +239,7 @@ async def transcribe_audio(
             if job.size_mb > 100:
                 logger.warning(f"Processing large file ({job.size_mb:.1f}MB) - may consume significant VRAM")
             logger.info(
-                f"Processing audio file: {audio_file.filename} ({job.size_mb:.1f}MB, "
+                f"Processing audio file: {sanitize_filename(audio_file.filename)} ({job.size_mb:.1f}MB, "
                 f"{job.duration:.0f}s), model: {model}, language: {language}"
             )
 
@@ -339,9 +351,9 @@ async def transcribe_audio(
     except DiarizationError as e:
         logger.error(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        logger.error(f"Transcription error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Transcription error")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     finally:
         prom_metrics.ACTIVE_TRANSCRIPTIONS.dec()
@@ -391,8 +403,9 @@ async def submit_job(
     """Accept an upload and return a job id."""
     if not jobs_mod.async_jobs_enabled():
         return disabled_response()
+    check_prompt_lengths(initial_prompt, hotwords)
     try:
-        model = resolve_model_name(model)
+        model = resolve_model_name(model, allow_local_paths=local_model_paths_allowed())
     except InvalidModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if diarize is not None or enable_diarization is not None:
