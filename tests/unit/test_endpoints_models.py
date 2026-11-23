@@ -30,10 +30,11 @@ def client_for(monkeypatch):
             return 1.0
 
         monkeypatch.setattr(audio_io, "decode_to_pcm", fake_decode)
-        seen = {}
+        seen = {"pipeline_calls": 0}
 
         def fake_pipeline(audio, model_name=None, **kwargs):
             seen["asr"] = model_name
+            seen["pipeline_calls"] += 1
             return {"language": "en", "segments": [], "word_segments": []}, None
 
         def fake_transcribe_and_align(audio, model, *args, **kwargs):
@@ -68,6 +69,55 @@ def test_asr_resolves_aliases_and_rejects_unknown_models(client_for):
     r = client.post("/asr?model=large-v4", files=_audio())
     assert r.status_code == 400
     assert "Unknown model" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("query", ["output_format=xml", "output=xml"])
+def test_invalid_output_format_is_rejected_before_the_upload_is_read(
+    client_for, monkeypatch, query
+):
+    client, seen = client_for(PRELOAD_MODEL="large-v3")
+
+    async def fail_receive(self, upload, max_bytes):
+        raise AssertionError("The upload must not be read for an invalid output format")
+
+    monkeypatch.setattr("app.audio_io.AudioJob.receive", fail_receive)
+    r = client.post(f"/asr?{query}", files=_audio())
+
+    assert r.status_code == 400, r.text
+    assert r.json() == {"detail": "Unsupported output format: xml"}
+    assert seen["pipeline_calls"] == 0
+
+
+def test_invalid_output_format_wins_over_audio_decode_error(client_for, monkeypatch):
+    client, seen = client_for(PRELOAD_MODEL="large-v3")
+
+    def fail_decode(src, dst):
+        raise RuntimeError("Failed to load audio")
+
+    monkeypatch.setattr("app.audio_io.decode_to_pcm", fail_decode)
+    r = client.post("/asr?output_format=xml", files=_audio())
+
+    assert r.status_code == 400, r.text
+    assert r.json() == {"detail": "Unsupported output format: xml"}
+    assert seen["pipeline_calls"] == 0
+
+
+@pytest.mark.parametrize("output_format", ["json", "text", "srt", "vtt", "tsv"])
+def test_supported_output_formats_still_run_the_pipeline(client_for, output_format):
+    client, seen = client_for(PRELOAD_MODEL="large-v3")
+    r = client.post(f"/asr?output_format={output_format}", files=_audio())
+
+    assert r.status_code == 200, r.text
+    assert seen["pipeline_calls"] == 1
+
+
+def test_legacy_output_alias_still_wins_over_output_format(client_for):
+    client, seen = client_for(PRELOAD_MODEL="large-v3")
+    r = client.post("/asr?output_format=srt&output=text", files=_audio())
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"text": ""}
+    assert seen["pipeline_calls"] == 1
 
 
 @pytest.mark.parametrize("model,expected", [

@@ -46,7 +46,7 @@ from app.job_runner import (
     too_many_response,
     poll_after,
 )
-from app.response_format import format_asr_response
+from app.response_format import OUTPUT_FORMATS, format_asr_response
 from app.request_flow import (
     admitted_job,
     busy_response,
@@ -220,6 +220,11 @@ async def transcribe_audio(
             should_diarize = True
         if return_speaker_embeddings is None:
             return_speaker_embeddings = False
+        if output_format not in OUTPUT_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported output format: {output_format}",
+            )
 
         async with admitted_job(audio_file, get_controller(), MAX_FILE_SIZE_MB) as job:
             prom_metrics.AUDIO_SIZE_MB.observe(job.size_mb)
